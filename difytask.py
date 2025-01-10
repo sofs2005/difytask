@@ -25,45 +25,66 @@ import re
 import requests
 
 @plugins.register(
-    name="difytask",
+    name="DifyTask",
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.0.1",
+    version="1.0.2",
     author="sofs2005",
 )
 class DifyTask(Plugin):
+    # 添加类变量来跟踪实例和初始化状态
+    _instance = None
+    _initialized = False
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            # 初始化类变量
+            cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self):
-        super().__init__()
-        self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
-        # 指令前缀
-        self.command_prefix = "$time"
-        # 确保数据目录存在
-        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir)
-        # 初始化数据库
-        self.db_path = os.path.join(self.data_dir, "tasks.db")
-        self._init_db()
-        # 初始化客户端
-        self.client = GewechatClient(conf().get("gewechat_base_url"), conf().get("gewechat_token"))
-        self.app_id = conf().get("gewechat_app_id")
-        
-        # 加载插件配置
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
-        self.plugin_config = {}
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                self.plugin_config = json.load(f)
-        
-        # 更新群组信息
-        self._update_groups()
-        # 启动定时器
-        self.running = True
-        self.timer_thread = threading.Thread(target=self._timer_loop)
-        self.timer_thread.daemon = True
-        self.timer_thread.start()
-        logger.info("[DifyTask] inited")
+        # 确保只初始化一次
+        if not self._initialized:
+            super().__init__()
+            self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
+            # 指令前缀
+            self.command_prefix = "$time"
+            # 确保数据目录存在
+            self.data_dir = os.path.join(os.path.dirname(__file__), "data")
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+            # 初始化数据库
+            self.db_path = os.path.join(self.data_dir, "tasks.db")
+            self._init_db()
+            # 初始化客户端
+            self.client = GewechatClient(conf().get("gewechat_base_url"), conf().get("gewechat_token"))
+            self.app_id = conf().get("gewechat_app_id")
+            
+            # 加载插件配置
+            config_path = os.path.join(os.path.dirname(__file__), "config.json")
+            self.plugin_config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    self.plugin_config = json.load(f)
+            
+            # 更新群组信息
+            self._update_groups()
+            # 启动定时器
+            self.running = True
+            self.timer_thread = threading.Thread(target=self._timer_loop)
+            self.timer_thread.daemon = True
+            self.timer_thread.start()
+            logger.info("[DifyTask] inited")
+            self._initialized = True
+
+    def __del__(self):
+        """析构函数，确保线程正确退出"""
+        self.running = False
+        if hasattr(self, 'timer_thread') and self.timer_thread.is_alive():
+            self.timer_thread.join(timeout=1)
+            logger.info("[DifyTask] timer thread stopped")
 
     def _init_db(self):
         """初始化数据库"""
