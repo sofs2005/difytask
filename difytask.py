@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.0.2",
+    version="1.0.3",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -157,6 +157,10 @@ class DifyTask(Plugin):
                         logger.error(f"[DifyTask] Failed to update group {chatroom_id}: {e}")
                         continue
                 
+                # 清理超过7天未更新的群信息
+                week_ago = current_time - 7 * 24 * 3600
+                cursor.execute('DELETE FROM groups WHERE updated_at < ?', (week_ago,))
+                
                 conn.commit()
                 conn.close()
                 logger.info("[DifyTask] Groups info updated")
@@ -238,7 +242,8 @@ Cron表达式格式（高级）：
                 g.nickname
             FROM tasks t
             LEFT JOIN groups g ON g.wxid = json_extract(t.context, '$.msg.from_user_id')
-            ORDER BY t.created_at DESC
+            ORDER BY json_extract(t.context, '$.isgroup') DESC,  -- 先按是否群消息排序
+                     COALESCE(g.nickname, json_extract(t.context, '$.msg.from_user_id'))  -- 再按群名/用户名排序
             ''')
             tasks = cursor.fetchall()
             
@@ -247,7 +252,8 @@ Cron表达式格式（高级）：
             if not tasks:
                 return "当前没有任务"
             
-            result = "任务列表:\n"
+            # 按群/用户分组整理任务
+            grouped_tasks = {}
             for task_id, time, circle, event, context_str, group_name in tasks:
                 try:
                     # 解析上下文信息
@@ -255,21 +261,39 @@ Cron表达式格式（高级）：
                     msg_info = context.get('msg', {})
                     is_group = context.get('isgroup', False)
                     
-                    # 构建显示信息
+                    # 获取显示名称
                     if is_group:
-                        # 群聊消息
-                        display_name = f"[群:{group_name or '未知群组'}]"
+                        display_name = f"群：{group_name or '未知群组'}"
                     else:
-                        # 私聊消息，获取用户昵称
                         user_id = msg_info.get('from_user_id', '')
                         nickname = self._get_user_nickname(user_id)
-                        display_name = f"[{nickname}]"
+                        display_name = f"用户：{nickname}"
                     
-                    result += f"[{task_id}] {time} {circle} {display_name} {event}\n"
+                    # 添加到分组中
+                    if display_name not in grouped_tasks:
+                        grouped_tasks[display_name] = []
+                    
+                    # 添加任务信息
+                    grouped_tasks[display_name].append({
+                        'id': task_id,
+                        'time': time,
+                        'circle': circle,
+                        'event': event
+                    })
+                    
                 except Exception as e:
                     logger.error(f"[DifyTask] 解析任务信息失败: {e}")
-                    result += f"[{task_id}] {time} {circle} {event}\n"
-                    
+                    continue
+            
+            # 生成显示文本
+            result = "任务列表:\n"
+            for group_name, tasks in grouped_tasks.items():
+                result += f"\n{group_name}\n"
+                result += "-" * 30 + "\n"
+                for task in tasks:
+                    result += f"[{task['id']}] {task['circle']} {task['time']} {task['event']}\n"
+                result += "\n"
+            
             return result.strip()
         except Exception as e:
             logger.error(f"[DifyTask] 获取任务列表失败: {e}")
@@ -563,11 +587,54 @@ Cron表达式格式（高级）：
             logger.error(f"[DifyTask] 删除任务失败: {e}")
             return f"删除任务失败: {str(e)}"
 
+    def _clean_expired_tasks(self):
+        """清理过期任务"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 获取所有任务
+            cursor.execute('SELECT id, circle, time FROM tasks')
+            tasks = cursor.fetchall()
+            now = datetime.now()
+            
+            for task_id, circle_str, time_str in tasks:
+                try:
+                    # 检查是否是一次性任务（具体日期）
+                    if len(circle_str) == 10:  # YYYY-MM-DD 格式
+                        task_date = datetime.strptime(f"{circle_str} {time_str}", "%Y-%m-%d %H:%M")
+                        # 如果任务时间已过期24小时，则删除
+                        if now - task_date > timedelta(hours=24):
+                            cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str}")
+                except Exception as e:
+                    logger.error(f"[DifyTask] 检查任务过期失败: {task_id} {e}")
+                    continue
+            
+            conn.commit()
+            conn.close()
+            logger.info("[DifyTask] 清理过期任务完成")
+        except Exception as e:
+            logger.error(f"[DifyTask] 清理过期任务失败: {e}")
+
     def _timer_loop(self):
         """定时器循环"""
+        last_group_update = 0  # 记录上次更新群信息的时间
+        
         while self.running:
             try:
                 now = datetime.now()
+                current_time = int(time.time())
+                
+                # 每天凌晨3点清理过期任务
+                if now.hour == 3 and now.minute == 0:
+                    self._clean_expired_tasks()
+                
+                # 每6小时更新一次群信息
+                if current_time - last_group_update > 21600:  # 21600秒 = 6小时
+                    self._update_groups()
+                    last_group_update = current_time
+                    logger.info("[DifyTask] 已更新群组信息")
                 
                 # 从数据库获取所有任务
                 conn = sqlite3.connect(self.db_path)
