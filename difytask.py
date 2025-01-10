@@ -290,6 +290,11 @@ Cron表达式格式（高级）：
     def _convert_to_cron(self, circle_str, time_str):
         """转换为cron表达式"""
         try:
+            # 如果已经是cron表达式，直接返回表达式内容
+            if circle_str.startswith("cron[") and circle_str.endswith("]"):
+                return circle_str[5:-1].strip()
+            
+            # 处理普通时间格式
             hour, minute = time_str.split(':')
             
             if circle_str == "每天":
@@ -314,15 +319,6 @@ Cron表达式格式（高级）：
             if len(circle_str) == 10:  # YYYY-MM-DD
                 date = datetime.strptime(circle_str, "%Y-%m-%d")
                 return f"{minute} {hour} {date.day} {date.month} *"
-                
-            # 如果已经是cron表达式
-            if circle_str.startswith("cron[") and circle_str.endswith("]"):
-                cron_exp = circle_str[5:-1].strip()  # 移除前后空格
-                # 验证格式
-                parts = cron_exp.split()
-                if len(parts) != 5:
-                    return None
-                return cron_exp
                 
             return None
         except Exception as e:
@@ -397,16 +393,35 @@ Cron表达式格式（高级）：
         try:
             logger.debug(f"[DifyTask] 创建任务: time={time_str}, circle={circle_str}, event={event_str}")
             
-            # 验证时间格式
-            if not self._validate_time_format(time_str):
-                logger.debug("[DifyTask] 时间格式验证失败")
-                return "时间格式错误，请使用 HH:mm 格式，例如：09:30"
+            # 如果是cron表达式，直接验证cron格式
+            if circle_str.startswith("cron[") and circle_str.endswith("]"):
+                cron_exp = circle_str[5:-1].strip()  # 移除前后空格
+                logger.debug(f"[DifyTask] 解析cron表达式: {cron_exp}")
+                try:
+                    # 检查格式：必须是5个部分
+                    parts = cron_exp.split()
+                    logger.debug(f"[DifyTask] cron表达式分割结果: {parts}")
+                    if len(parts) != 5:
+                        return "cron表达式必须包含5个部分：分 时 日 月 周，例如：cron[0 9 * * 1-5]"
+                    croniter(cron_exp)
+                    time_str = "cron"  # 对于cron表达式，time_str不需要验证
+                except ValueError as e:
+                    logger.error(f"[DifyTask] cron表达式数值错误: {e}")
+                    return f"cron表达式数值错误: {str(e)}"
+                except Exception as e:
+                    logger.error(f"[DifyTask] cron表达式验证失败: {e}")
+                    return "cron表达式格式错误，正确格式为：cron[分 时 日 月 周]，例如：cron[0 9 * * 1-5]"
+            else:
+                # 验证时间格式
+                if not self._validate_time_format(time_str):
+                    logger.debug("[DifyTask] 时间格式验证失败")
+                    return "时间格式错误，请使用 HH:mm 格式，例如：09:30"
                 
-            # 验证周期格式
-            if not self._validate_circle_format(circle_str):
-                logger.debug("[DifyTask] 周期格式验证失败")
-                return "周期格式错误，支持：每天、每周x、工作日、YYYY-MM-DD、cron[表达式]"
-                
+                # 验证周期格式
+                if not self._validate_circle_format(circle_str):
+                    logger.debug("[DifyTask] 周期格式验证失败")
+                    return "周期格式错误，支持：每天、每周x、工作日、YYYY-MM-DD、今天、明天、后天"
+
             # 转换为cron表达式
             cron_exp = self._convert_to_cron(circle_str, time_str)
             if not cron_exp:
@@ -736,6 +751,28 @@ Cron表达式格式（高级）：
                 return
             
             # 创建任务
+            # 先检查是否是 cron 表达式
+            if "cron[" in command:
+                # 使用正则表达式匹配 cron 表达式和事件内容
+                import re
+                match = re.match(r'cron\[(.*?)\]\s*(.*)', command)
+                if match:
+                    cron_exp = match.group(1).strip()
+                    event_str = match.group(2).strip()
+                    if not event_str:
+                        e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                    result = self._create_task("cron", f"cron[{cron_exp}]", event_str, e_context['context'])
+                    e_context['reply'] = Reply(ReplyType.TEXT, result)
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                else:
+                    e_context['reply'] = Reply(ReplyType.TEXT, "cron表达式格式错误，正确格式：$time cron[分 时 日 月 周] 事件内容")
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+            
+            # 处理普通定时任务
             parts = command.split(" ", 2)
             if len(parts) == 3:
                 circle_str, time_str, event_str = parts
