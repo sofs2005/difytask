@@ -90,4 +90,4 @@ $time 取消任务 任务ID
 
 开源不易，感谢打赏支持！
 
-![打赏](https://cdn.jsdelivr.net/gh/sofs2005/difytask@main/images/打赏.png)
+![打赏](https://github.com/sofs2005/difytask/blob/main/img/wx.png?raw=true)
