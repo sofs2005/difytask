@@ -437,6 +437,18 @@ Cron表达式格式（高级）：
         """创建任务"""
         try:
             logger.debug(f"[DifyTask] 创建任务: time={time_str}, circle={circle_str}, event={event_str}")
+            logger.info(f"[DifyTask] 收到的完整 context 对象: {context}")
+            
+            # 获取消息相关信息
+            cmsg: ChatMessage = context.get("msg", None)
+            logger.info(f"[DifyTask] 原始消息对象详情:")
+            logger.info(f"- content: {getattr(cmsg, 'content', None)}")
+            logger.info(f"- from_user_id: {getattr(cmsg, 'from_user_id', None)}")
+            logger.info(f"- to_user_id: {getattr(cmsg, 'to_user_id', None)}")
+            logger.info(f"- actual_user_id: {getattr(cmsg, 'actual_user_id', None)}")
+            logger.info(f"- is_group: {getattr(cmsg, 'is_group', None)}")
+            logger.info(f"- create_time: {getattr(cmsg, 'create_time', None)}")
+            logger.info(f"- 其他可用属性: {dir(cmsg)}")
             
             # 如果是cron表达式，直接验证cron格式
             if circle_str.startswith("cron[") and circle_str.endswith("]"):
@@ -666,96 +678,57 @@ Cron表达式格式（高级）：
     def _execute_task(self, task_id: str, context_info: dict):
         """执行任务"""
         try:
-            logger.info(f"[DifyTask] 执行任务: {task_id}")
-            logger.info(f"[DifyTask] 完整上下文信息: {context_info}")
-            
-            # 如果是一次性任务（具体日期），执行后删除
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT circle FROM tasks WHERE id = ?', (task_id,))
-            task = cursor.fetchone()
-            
-            if task and len(task[0]) == 10:  # YYYY-MM-DD
-                cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-                conn.commit()
-                logger.info(f"[DifyTask] 删除一次性任务: {task_id}")
-            
-            conn.close()
-            
-            # 获取消息信息
             msg_info = context_info.get('msg', {})
-            content = context_info['content']
-            logger.info(f"[DifyTask] 消息信息: {msg_info}")
+            content = context_info.get('content', '')
+            is_group = context_info.get('isgroup', False)
             
-            # 判断是提醒还是命令
             if content.startswith('提醒'):
-                # 提醒消息：直接发送给用户
-                remind_content = content[2:].strip()  # 移除"提醒"前缀
-                logger.info(f"[DifyTask] 处理提醒消息: {remind_content}")
-                
-                if context_info.get('isgroup', False):
-                    # 群聊消息
-                    room_id = msg_info.get("from_user_id", "")
-                    logger.info(f"[DifyTask] 发送群提醒: room_id={room_id}, content={remind_content}")
-                    if room_id:
-                        try:
-                            response = self.client.post_text(self.app_id, room_id, remind_content, "")
-                            logger.info(f"[DifyTask] 群提醒发送响应: {response}")
-                        except Exception as e:
-                            logger.error(f"[DifyTask] 群提醒发送失败: {e}")
-                else:
-                    # 私聊消息
-                    to_user = msg_info.get("from_user_id", "")
-                    logger.info(f"[DifyTask] 发送私聊提醒: to_user={to_user}, content={remind_content}")
-                    if to_user:
-                        try:
-                            response = self.client.post_text(self.app_id, to_user, remind_content, "")
-                            logger.info(f"[DifyTask] 私聊提醒发送响应: {response}")
-                        except Exception as e:
-                            logger.error(f"[DifyTask] 私聊提醒发送失败: {e}")
+                pass
             else:
-                # 命令消息：构建 Context 并使用 channel.produce() 处理
                 logger.info(f"[DifyTask] 处理命令消息: {content}")
                 
-                # 构建 ChatMessage 对象
-                chat_msg = ChatMessage(msg_info.get("create_time", int(time.time())))
-                chat_msg.from_user_id = msg_info.get("from_user_id", "")
-                chat_msg.to_user_id = msg_info.get("to_user_id", "")
-                chat_msg.actual_user_id = msg_info.get("actual_user_id", "")
+                # 从数据库中获取的消息信息
+                logger.info(f"[DifyTask] 数据库中的 context_info: {context_info}")
+                logger.info(f"[DifyTask] 数据库中的 msg_info: {msg_info}")
+                
+                # 使用 ChatMessage 并设置必要属性
+                from channel.chat_message import ChatMessage
+                
+                chat_msg = ChatMessage({})
                 chat_msg.content = content
-                chat_msg.is_group = context_info.get('isgroup', False)
+                chat_msg.from_user_id = msg_info.get('from_user_id')
+                chat_msg.actual_user_id = msg_info.get('actual_user_id')
+                chat_msg.is_group = is_group
+                chat_msg.create_time = msg_info.get("create_time", int(time.time()))
+                chat_msg._prepared = True
                 
-                # 构建 Context 对象
-                context = Context()
-                context.type = ContextType.TEXT
-                context.content = content
-                context.isgroup = context_info.get('isgroup', False)
+                # 构建 Context
+                context = Context(ContextType.TEXT, content)
+                session_id = msg_info.get('from_user_id')  # 定义 session_id 变量
+                context["session_id"] = session_id
+                context["receiver"] = msg_info.get('from_user_id')
+                context["msg"] = chat_msg
+                context["isgroup"] = is_group
+                context["group_name"] = "内部群" if is_group else None
+                context["is_shared_session_group"] = True if is_group else False
+                context["origin_ctype"] = ContextType.TEXT
+                context["openai_api_key"] = None
+                context["gpt_model"] = None
+                context["no_need_at"] = True
                 
-                # 获取 channel 实例
+                logger.info(f"[DifyTask] 发送的消息结构:")
+                logger.info(f"- context: {context}")
+                logger.info(f"- chat_msg 属性:")
+                logger.info(f"  - content: {chat_msg.content}")
+                logger.info(f"  - from_user_id: {chat_msg.from_user_id}")
+                logger.info(f"  - actual_user_id: {chat_msg.actual_user_id}")
+                logger.info(f"  - is_group: {chat_msg.is_group}")
+                
                 from channel.chat_channel import ChatChannel
                 channel = ChatChannel()
-                
-                # 设置接收者和会话ID
-                if context_info.get('isgroup', False):
-                    # 群聊消息
-                    receiver = msg_info.get("from_user_id", "")  # 群ID
-                    session_id = f"{receiver}_{msg_info.get('actual_user_id', '')}"
-                else:
-                    # 私聊消息
-                    receiver = msg_info.get("from_user_id", "")
-                    session_id = receiver
-                
-                context.kwargs = {
-                    'msg': chat_msg,
-                    'receiver': receiver,  # 群聊时使用群ID作为接收者
-                    'session_id': session_id,
-                    'channel': channel
-                }
-                
-                # 使用 channel.produce() 处理消息
                 channel.produce(context)
                 
-                logger.info(f"[DifyTask] 命令消息已转发: {content}, receiver={receiver}, session_id={session_id}")
+                logger.info(f"[DifyTask] 命令消息已转发: {content}, receiver={context['receiver']}, session_id={session_id}")
             
             logger.info(f"[DifyTask] 任务执行完成: {task_id}")
             
