@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.0",
+    version="1.2.1",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -78,6 +78,8 @@ class DifyTask(Plugin):
             self.timer_thread.start()
             logger.info("[DifyTask] inited")
             self._initialized = True
+            # 添加任务ID计数器
+            self._task_counter = self._get_last_task_id()
 
     def __del__(self):
         """析构函数，确保线程正确退出"""
@@ -433,6 +435,28 @@ Cron表达式格式（高级）：
             logger.error(f"[DifyTask] 周期格式验证异常: {e}")
             return False
 
+    def _get_last_task_id(self):
+        """获取数据库中最后一个数字类型的任务ID"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # 简单地获取所有ID，在Python中过滤
+            cursor.execute('SELECT id FROM tasks')
+            ids = cursor.fetchall()
+            conn.close()
+            
+            # 过滤出纯数字ID并找出最大值
+            numeric_ids = [int(id[0]) for id in ids if id[0].isdigit()]
+            return max(numeric_ids) if numeric_ids else 1000
+        except Exception as e:
+            logger.error(f"[DifyTask] 获取最后任务ID失败: {e}")
+            return 1000  # 出错时从1000开始
+
+    def _generate_task_id(self):
+        """生成新的任务ID"""
+        self._task_counter += 1
+        return str(self._task_counter)
+
     def _create_task(self, time_str, circle_str, event_str, context):
         """创建任务"""
         try:
@@ -474,7 +498,7 @@ Cron表达式格式（高级）：
                 return "转换cron表达式失败"
                 
             # 生成任务ID
-            task_id = str(int(time.time()))
+            task_id = self._generate_task_id()
             logger.debug(f"[DifyTask] 生成任务ID: {task_id}")
             
             # 获取消息相关信息
