@@ -29,64 +29,125 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.3",
+    version="1.2.4",
     author="sofs2005",
 )
 class DifyTask(Plugin):
-    # 添加类变量来跟踪实例和初始化状态
-    _instance = None
-    _initialized = False
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            # 初始化类变量
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self):
-        # 确保只初始化一次
-        if not self._initialized:
-            super().__init__()
-            self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
-            # 指令前缀
-            self.command_prefix = "$time"
-            # 确保数据目录存在
-            self.data_dir = os.path.join(os.path.dirname(__file__), "data")
-            if not os.path.exists(self.data_dir):
-                os.makedirs(self.data_dir)
-            # 初始化数据库
-            self.db_path = os.path.join(self.data_dir, "tasks.db")
-            self._init_db()
-            # 初始化客户端
-            self.client = GewechatClient(conf().get("gewechat_base_url"), conf().get("gewechat_token"))
-            self.app_id = conf().get("gewechat_app_id")
-            
-            # 加载插件配置
-            config_path = os.path.join(os.path.dirname(__file__), "config.json")
-            self.plugin_config = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    self.plugin_config = json.load(f)
-            
-            # 更新群组信息
-            self._update_groups()
-            # 启动定时器
+        super().__init__()
+        self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
+        # 添加线程锁
+        self._thread_lock = threading.Lock()
+        
+        # 指令前缀
+        self.command_prefix = "$time"
+        # 确保数据目录存在
+        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir)
+        # 初始化数据库
+        self.db_path = os.path.join(self.data_dir, "tasks.db")
+        self._init_db()
+        # 初始化客户端
+        self.client = GewechatClient(conf().get("gewechat_base_url"), conf().get("gewechat_token"))
+        self.app_id = conf().get("gewechat_app_id")
+        
+        # 加载插件配置
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        self.plugin_config = {}
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                self.plugin_config = json.load(f)
+        
+        # 更新群组信息
+        self._update_groups()
+        
+        # 初始化线程控制
+        with self._thread_lock:
             self.running = True
             self.timer_thread = threading.Thread(target=self._timer_loop)
             self.timer_thread.daemon = True
             self.timer_thread.start()
-            logger.info("[DifyTask] inited")
-            self._initialized = True
-            # 添加任务ID计数器
-            self._task_counter = self._get_last_task_id()
+        
+        logger.info("[DifyTask] plugin initialized")
+
+    def reload(self):
+        """重载时停止旧线程，返回 (success, message)"""
+        with self._thread_lock:
+            # 停止旧线程
+            if hasattr(self, 'running'):
+                self.running = False
+                if hasattr(self, 'timer_thread') and self.timer_thread and self.timer_thread.is_alive():
+                    try:
+                        self.timer_thread.join(timeout=30)
+                        if self.timer_thread.is_alive():
+                            return False, "Failed to stop timer thread"
+                    except Exception as e:
+                        return False, f"Error stopping timer thread: {e}"
+            
+            # 重新初始化线程
+            try:
+                self.running = True
+                self.timer_thread = threading.Thread(target=self._timer_loop)
+                self.timer_thread.daemon = True
+                self.timer_thread.start()
+                return True, "Timer thread restarted successfully"
+            except Exception as e:
+                return False, f"Error starting new timer thread: {e}"
 
     def __del__(self):
         """析构函数，确保线程正确退出"""
-        self.running = False
-        if hasattr(self, 'timer_thread') and self.timer_thread.is_alive():
+        if hasattr(self, 'running'):
+            self.running = False
+        if hasattr(self, 'timer_thread') and self.timer_thread and self.timer_thread.is_alive():
             self.timer_thread.join(timeout=1)
             logger.info("[DifyTask] timer thread stopped")
+
+    def _timer_loop(self):
+        """定时器循环"""
+        thread_id = threading.get_ident()  # 获取线程ID
+        logger.info(f"[DifyTask] Timer thread {thread_id} started")
+        
+        last_group_update = 0
+        last_execute_time = 0
+        last_clean_time = 0
+        
+        while self.running:
+            try:
+                now = datetime.now()
+                current_time = int(time.time())
+                
+                # 从数据库获取所有任务
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('SELECT id, cron, context FROM tasks')
+                tasks = cursor.fetchall()
+                conn.close()
+                
+                # 检查每个任务
+                for task_id, cron_exp, context_json in tasks:
+                    try:
+                        logger.debug(f"[DifyTask] Thread {thread_id} checking task {task_id}")
+                        cron = croniter(cron_exp, now)
+                        next_time = cron.get_prev(datetime)
+                        time_diff = (now - next_time).total_seconds()
+                        
+                        if time_diff < 60 and current_time - last_execute_time >= 10:
+                            logger.debug(f"[DifyTask] Thread {thread_id} preparing to execute task {task_id}")
+                            context_info = json.loads(context_json)
+                            self._execute_task(task_id, context_info)
+                            last_execute_time = current_time
+                            logger.info(f"[DifyTask] Thread {thread_id} executed task {task_id}")
+                    except Exception as e:
+                        logger.error(f"[DifyTask] Thread {thread_id} error checking task {task_id}: {str(e)}")
+                
+                sleep_time = 60 - datetime.now().second
+                logger.debug(f"[DifyTask] Thread {thread_id} sleeping for {sleep_time} seconds")
+                time.sleep(sleep_time)
+                
+            except Exception as e:
+                logger.error(f"[DifyTask] Timer thread {thread_id} error: {e}")
+                time.sleep(60)
 
     def _init_db(self):
         """初始化数据库"""
@@ -671,60 +732,6 @@ Cron表达式格式（高级）：
             logger.info("[DifyTask] 清理过期任务完成")
         except Exception as e:
             logger.error(f"[DifyTask] 清理过期任务失败: {e}")
-
-    def _timer_loop(self):
-        """定时器循环"""
-        last_group_update = 0
-        last_execute_time = 0  # 记录上次执行任务的时间
-        
-        while self.running:
-            try:
-                now = datetime.now()
-                current_time = int(time.time())
-                
-                # 每天凌晨3点清理过期任务
-                if now.hour == 3 and now.minute == 0:
-                    self._clean_expired_tasks()
-                
-                # 每6小时更新一次群信息
-                if current_time - last_group_update > 21600:  # 21600秒 = 6小时
-                    self._update_groups()
-                    last_group_update = current_time
-                
-                # 从数据库获取所有任务
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute('SELECT id, cron, context FROM tasks')
-                tasks = cursor.fetchall()
-                conn.close()
-                
-                # 检查每个任务
-                for task_id, cron_exp, context_json in tasks:
-                    try:
-                        cron = croniter(cron_exp, now)
-                        next_time = cron.get_prev(datetime)
-                        time_diff = (now - next_time).total_seconds()
-                        
-                        # 如果任务应该执行，且距离上次执行超过10秒
-                        if time_diff < 60 and current_time - last_execute_time >= 10:
-                            context_info = json.loads(context_json)
-                            logger.info(f"[DifyTask] 等待 {10 - (current_time - last_execute_time)} 秒后执行任务: {task_id}")
-                            # 等待剩余时间
-                            remaining_time = 10 - (current_time - last_execute_time)
-                            if remaining_time > 0:
-                                time.sleep(remaining_time)
-                            self._execute_task(task_id, context_info)
-                            last_execute_time = int(time.time())  # 更新最后执行时间
-                    except Exception as e:
-                        logger.error(f"[DifyTask] 检查任务异常: {task_id} {str(e)}")
-                
-                # 每分钟检查一次
-                sleep_time = 60 - datetime.now().second
-                time.sleep(sleep_time)
-                
-            except Exception as e:
-                logger.error(f"[DifyTask] 定时器异常: {e}")
-                time.sleep(60)
 
     def _execute_task(self, task_id: str, context_info: dict):
         """执行任务"""
