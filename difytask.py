@@ -29,71 +29,92 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.4",
+    version="1.2.5",
     author="sofs2005",
 )
 class DifyTask(Plugin):
+    _instance = None
+    _initialized = False
+    _scheduler = None
+    _scheduler_lock = threading.Lock()
+    _running = False
+
     def __init__(self):
-        super().__init__()
-        self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
-        # 添加线程锁
-        self._thread_lock = threading.Lock()
-        
-        # 指令前缀
-        self.command_prefix = "$time"
-        # 确保数据目录存在
-        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir)
-        # 初始化数据库
-        self.db_path = os.path.join(self.data_dir, "tasks.db")
-        self._init_db()
-        # 初始化客户端
-        self.client = GewechatClient(conf().get("gewechat_base_url"), conf().get("gewechat_token"))
-        self.app_id = conf().get("gewechat_app_id")
-        
-        # 加载插件配置
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
-        self.plugin_config = {}
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                self.plugin_config = json.load(f)
-        
-        # 更新群组信息
-        self._update_groups()
-        
-        # 初始化线程控制
-        with self._thread_lock:
-            self.running = True
-            self.timer_thread = threading.Thread(target=self._timer_loop)
-            self.timer_thread.daemon = True
-            self.timer_thread.start()
-        
-        logger.info("[DifyTask] plugin initialized")
+        # 确保只初始化一次
+        if not self._initialized:
+            super().__init__()
+            # 初始化 handlers
+            self.handlers = {}
+            self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
+            
+            # 指令前缀
+            self.command_prefix = "$time"
+            # 确保数据目录存在
+            self.data_dir = os.path.join(os.path.dirname(__file__), "data")
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+            # 初始化数据库
+            self.db_path = os.path.join(self.data_dir, "tasks.db")
+            self._init_db()
+            # 初始化客户端
+            self.client = GewechatClient(conf().get("gewechat_base_url"), conf().get("gewechat_token"))
+            self.app_id = conf().get("gewechat_app_id")
+            
+            # 加载插件配置
+            config_path = os.path.join(os.path.dirname(__file__), "config.json")
+            self.plugin_config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    self.plugin_config = json.load(f)
+            
+            # 更新群组信息
+            self._update_groups()
+            
+            # 修改定时器初始化部分
+            with self._scheduler_lock:
+                # 如果存在旧的调度器，先停止它
+                if self._scheduler and self._scheduler.is_alive():
+                    self._running = False  # 停止旧的循环
+                    self._scheduler.join(timeout=1)  # 等待旧线程结束
+                
+                # 启动新的调度器
+                self._running = True
+                self._scheduler = threading.Thread(target=self._timer_loop)
+                self._scheduler.daemon = True
+                self._scheduler.start()
+            
+            logger.info("[DifyTask] plugin initialized")
+            self._initialized = True
 
     def reload(self):
         """重载时停止旧线程，返回 (success, message)"""
-        with self._thread_lock:
-            # 停止旧线程
-            if hasattr(self, 'running'):
-                self.running = False
-                if hasattr(self, 'timer_thread') and self.timer_thread and self.timer_thread.is_alive():
+        try:
+            with self._scheduler_lock:
+                # 停止旧线程
+                self._running = False
+                if self._scheduler and self._scheduler.is_alive():
                     try:
-                        self.timer_thread.join(timeout=30)
-                        if self.timer_thread.is_alive():
+                        self._scheduler.join(timeout=30)
+                        if self._scheduler.is_alive():
                             return False, "Failed to stop timer thread"
                     except Exception as e:
                         return False, f"Error stopping timer thread: {e}"
-            
-            # 重新初始化线程
-            try:
-                self.running = True
-                self.timer_thread = threading.Thread(target=self._timer_loop)
-                self.timer_thread.daemon = True
-                self.timer_thread.start()
+                
+                # 重新初始化 handlers
+                self.handlers = {}
+                self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
+                
+                # 重新初始化线程
+                self._running = True
+                self._scheduler = threading.Thread(target=self._timer_loop)
+                self._scheduler.daemon = True
+                self._scheduler.start()
+                
+                logger.info("[DifyTask] Plugin reloaded successfully")
                 return True, "Timer thread restarted successfully"
-            except Exception as e:
-                return False, f"Error starting new timer thread: {e}"
+        except Exception as e:
+            logger.error(f"[DifyTask] Reload failed: {e}")
+            return False, f"Error reloading plugin: {e}"
 
     def __del__(self):
         """析构函数，确保线程正确退出"""
@@ -105,48 +126,100 @@ class DifyTask(Plugin):
 
     def _timer_loop(self):
         """定时器循环"""
-        thread_id = threading.get_ident()  # 获取线程ID
-        logger.info(f"[DifyTask] Timer thread {thread_id} started")
-        
         last_group_update = 0
-        last_execute_time = 0
-        last_clean_time = 0
-        
-        while self.running:
+        last_check_time = 0
+
+        while self._running:
             try:
                 now = datetime.now()
                 current_time = int(time.time())
+
+                # 避免在同一秒内多次检查任务
+                if current_time == last_check_time:
+                    time.sleep(0.1)
+                    continue
+
+                last_check_time = current_time
+
+                # 每天凌晨3点清理过期任务
+                if now.hour == 3 and now.minute == 0:
+                    self._clean_expired_tasks()
+                
+                # 每6小时更新一次群信息
+                if current_time - last_group_update > 21600:  # 21600秒 = 6小时
+                    self._update_groups()
+                    last_group_update = current_time
                 
                 # 从数据库获取所有任务
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
-                cursor.execute('SELECT id, cron, context FROM tasks')
-                tasks = cursor.fetchall()
-                conn.close()
                 
-                # 检查每个任务
-                for task_id, cron_exp, context_json in tasks:
-                    try:
-                        logger.debug(f"[DifyTask] Thread {thread_id} checking task {task_id}")
-                        cron = croniter(cron_exp, now)
-                        next_time = cron.get_prev(datetime)
-                        time_diff = (now - next_time).total_seconds()
+                try:
+                    # 开始事务
+                    cursor.execute('BEGIN IMMEDIATE')
+                    
+                    # 获取需要执行的任务
+                    cursor.execute('''
+                        SELECT id, cron, context, last_executed_at 
+                        FROM tasks 
+                        WHERE last_executed_at < ?
+                    ''', (current_time - 60,))
+                    
+                    tasks = cursor.fetchall()
+                    tasks_to_execute = []
+                    
+                    # 首先尝试更新所有需要执行的任务
+                    for task_id, cron_exp, context_json, last_executed_at in tasks:
+                        try:
+                            cron = croniter(cron_exp, now)
+                            next_time = cron.get_prev(datetime)
+                            time_diff = (now - next_time).total_seconds()
+                            
+                            # 检查是否在执行时间窗口内
+                            if 0 <= time_diff < 60:
+                                # 尝试更新执行时间
+                                cursor.execute('''
+                                    UPDATE tasks 
+                                    SET last_executed_at = ? 
+                                    WHERE id = ? 
+                                    AND last_executed_at < ?
+                                ''', (current_time, task_id, current_time - 60))
+                                
+                                # 如果更新成功，将任务添加到执行列表
+                                if cursor.rowcount > 0:
+                                    tasks_to_execute.append((task_id, context_json))
                         
-                        if time_diff < 60 and current_time - last_execute_time >= 10:
-                            logger.debug(f"[DifyTask] Thread {thread_id} preparing to execute task {task_id}")
+                        except Exception as e:
+                            logger.error(f"[DifyTask] 检查任务异常: {task_id} {str(e)}")
+                            continue
+                    
+                    # 提交事务，确保所有更新都已完成
+                    conn.commit()
+                    
+                    # 执行所有已更新的任务
+                    for task_id, context_json in tasks_to_execute:
+                        try:
                             context_info = json.loads(context_json)
                             self._execute_task(task_id, context_info)
-                            last_execute_time = current_time
-                            logger.info(f"[DifyTask] Thread {thread_id} executed task {task_id}")
-                    except Exception as e:
-                        logger.error(f"[DifyTask] Thread {thread_id} error checking task {task_id}: {str(e)}")
+                        except Exception as e:
+                            logger.error(f"[DifyTask] 执行任务异常: {task_id} {str(e)}")
+                    
+                except Exception as e:
+                    # 如果发生异常，回滚事务
+                    conn.rollback()
+                    logger.error(f"[DifyTask] 数据库操作异常: {str(e)}")
                 
-                sleep_time = 60 - datetime.now().second
-                logger.debug(f"[DifyTask] Thread {thread_id} sleeping for {sleep_time} seconds")
-                time.sleep(sleep_time)
-                
+                finally:
+                    # 确保关闭连接
+                    conn.close()
+
+                # 优化休眠时间
+                next_second = (now + timedelta(seconds=1)).replace(microsecond=0)
+                sleep_time = (next_second - now).total_seconds()
+                time.sleep(max(0.1, sleep_time))
+
             except Exception as e:
-                logger.error(f"[DifyTask] Timer thread {thread_id} error: {e}")
+                logger.error(f"[DifyTask] 定时器异常: {e}")
                 time.sleep(60)
 
     def _init_db(self):
@@ -155,7 +228,7 @@ class DifyTask(Plugin):
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # 创建任务表
+            # 创建任务表，添加 last_executed_at 字段
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
@@ -164,9 +237,16 @@ class DifyTask(Plugin):
                     cron TEXT NOT NULL,
                     event TEXT NOT NULL,
                     context TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    last_executed_at INTEGER DEFAULT 0
                 )
             ''')
+            
+            # 为现有表添加 last_executed_at 字段（如果不存在）
+            try:
+                cursor.execute('ALTER TABLE tasks ADD COLUMN last_executed_at INTEGER DEFAULT 0')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在，忽略错误
             
             # 创建群组信息表
             cursor.execute('''
@@ -792,12 +872,15 @@ Cron表达式格式（高级）：
                             if group_info.get('ret') == 200:
                                 data = group_info.get('data', {})
                                 chat_msg.other_user_nickname = data.get('nickName', chat_msg.from_user_id)
+                                chat_msg.actual_user_nickname = data.get('nickName', chat_msg.from_user_id)
                             else:
                                 logger.error(f"[DifyTask] 获取群信息失败: {group_info}")
                                 chat_msg.other_user_nickname = chat_msg.from_user_id
+                                chat_msg.actual_user_nickname = chat_msg.from_user_id
                         except Exception as e:
                             logger.error(f"[DifyTask] 获取群名称失败: {e}")
                             chat_msg.other_user_nickname = chat_msg.from_user_id
+                            chat_msg.actual_user_nickname = chat_msg.from_user_id
                     else:
                         # 获取用户昵称
                         try:
@@ -815,13 +898,17 @@ Cron表达式格式（高级）：
                                 data = response.json()
                                 if data.get('ret') == 200 and data.get('data'):
                                     chat_msg.other_user_nickname = data['data'][0].get('nickName', chat_msg.from_user_id)
+                                    chat_msg.actual_user_nickname = data['data'][0].get('nickName', chat_msg.from_user_id)
                                 else:
                                     chat_msg.other_user_nickname = chat_msg.from_user_id
+                                    chat_msg.actual_user_nickname = chat_msg.from_user_id
                             else:
                                 chat_msg.other_user_nickname = chat_msg.from_user_id
+                                chat_msg.actual_user_nickname = chat_msg.from_user_id
                         except Exception as e:
                             logger.error(f"[DifyTask] 获取用户昵称失败: {e}")
                             chat_msg.other_user_nickname = chat_msg.from_user_id
+                            chat_msg.actual_user_nickname = chat_msg.from_user_id
                     
                     # 构建 Context
                     context = Context(ContextType.TEXT, content)
