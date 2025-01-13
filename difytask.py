@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.1",
+    version="1.2.2",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -726,11 +726,15 @@ Cron表达式格式（高级）：
                         token=conf().get("gewechat_token")
                     )
                     
-                    # 直接发送提醒消息
+                    # 去掉"提醒"前缀并格式化消息
+                    reminder_content = content[2:].strip()  # 移除"提醒"两个字
+                    reminder_message = f"⏰ 定时提醒\n{'-' * 20}\n{reminder_content}\n{'-' * 20}\n发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    
+                    # 发送提醒消息
                     client.post_text(
                         conf().get("gewechat_app_id"),
                         msg_info.get('from_user_id'),
-                        content
+                        reminder_message
                     )
                     logger.info(f"[DifyTask] 已发送提醒消息: {task_id}")
                     
