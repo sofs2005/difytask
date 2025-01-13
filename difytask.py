@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.2",
+    version="1.2.3",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -454,8 +454,26 @@ Cron表达式格式（高级）：
 
     def _generate_task_id(self):
         """生成新的任务ID"""
-        self._task_counter += 1
-        return str(self._task_counter)
+        alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+        
+        while True:
+            # 生成4位ID
+            result = ''
+            seed = int(str(time.time_ns())[-6:])
+            for _ in range(4):
+                seed = (seed * 1103515245 + 12345) & 0x7fffffff
+                result += alphabet[seed % len(alphabet)]
+            
+            # 检查是否已存在
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1 FROM tasks WHERE id = ?', (result,))
+            exists = cursor.fetchone()
+            conn.close()
+            
+            # 如果ID不存在，则使用它
+            if not exists:
+                return result
 
     def _create_task(self, time_str, circle_str, event_str, context):
         """创建任务"""
