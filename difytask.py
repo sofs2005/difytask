@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.1.0",
+    version="1.2.0",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -601,9 +601,21 @@ Cron表达式格式（高级）：
             
             for task_id, circle_str, time_str in tasks:
                 try:
-                    # 检查是否是一次性任务（具体日期）
+                    # 检查是否是一次性任务
                     if len(circle_str) == 10:  # YYYY-MM-DD 格式
                         task_date = datetime.strptime(f"{circle_str} {time_str}", "%Y-%m-%d %H:%M")
+                        # 如果任务时间已过期24小时，则删除
+                        if now - task_date > timedelta(hours=24):
+                            cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str}")
+                    # 检查其他一次性任务（今天、明天、后天）
+                    elif circle_str in ["今天", "明天", "后天"]:
+                        # 解析任务时间
+                        days_map = {"今天": 0, "明天": 1, "后天": 2}
+                        task_date = datetime.now().replace(hour=int(time_str.split(':')[0]), 
+                                                        minute=int(time_str.split(':')[1]), 
+                                                        second=0, microsecond=0)
+                        task_date = task_date + timedelta(days=days_map[circle_str])
                         # 如果任务时间已过期24小时，则删除
                         if now - task_date > timedelta(hours=24):
                             cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
@@ -621,6 +633,7 @@ Cron表达式格式（高级）：
     def _timer_loop(self):
         """定时器循环"""
         last_group_update = 0
+        last_execute_time = 0  # 记录上次执行任务的时间
         
         while self.running:
             try:
@@ -650,9 +663,16 @@ Cron表达式格式（高级）：
                         next_time = cron.get_prev(datetime)
                         time_diff = (now - next_time).total_seconds()
                         
-                        if time_diff < 60:
+                        # 如果任务应该执行，且距离上次执行超过10秒
+                        if time_diff < 60 and current_time - last_execute_time >= 10:
                             context_info = json.loads(context_json)
+                            logger.info(f"[DifyTask] 等待 {10 - (current_time - last_execute_time)} 秒后执行任务: {task_id}")
+                            # 等待剩余时间
+                            remaining_time = 10 - (current_time - last_execute_time)
+                            if remaining_time > 0:
+                                time.sleep(remaining_time)
                             self._execute_task(task_id, context_info)
+                            last_execute_time = int(time.time())  # 更新最后执行时间
                     except Exception as e:
                         logger.error(f"[DifyTask] 检查任务异常: {task_id} {str(e)}")
                 
@@ -766,12 +786,31 @@ Cron表达式格式（高级）：
                     # 创建 channel 并发送消息
                     from channel.gewechat.gewechat_channel import GeWeChatChannel
                     channel = GeWeChatChannel()
+                    if not channel.client:
+                        channel.client = self.client
                     channel.produce(context)
                     logger.info(f"[DifyTask] 已转发消息到插件处理: {task_id}")
                     
                 except Exception as e:
                     logger.error(f"[DifyTask] 转发消息失败: {e}")
                     raise
+
+            # 检查并删除一次性任务
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('SELECT circle FROM tasks WHERE id = ?', (task_id,))
+                result = cursor.fetchone()
+                if result:
+                    circle_str = result[0]
+                    # 如果是一次性任务（具体日期或今天/明天/后天），则删除
+                    if len(circle_str) == 10 or circle_str in ["今天", "明天", "后天"]:
+                        cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+                        conn.commit()
+                        logger.info(f"[DifyTask] 已删除一次性任务: {task_id}")
+                conn.close()
+            except Exception as e:
+                logger.error(f"[DifyTask] 删除一次性任务失败: {task_id} {e}")
             
         except Exception as e:
             logger.error(f"[DifyTask] 执行任务异常: {e}")
