@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.6",
+    version="1.3.0",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -687,19 +687,30 @@ Cron表达式格式（高级）：
                     except ValueError:
                         return "日期格式错误"
 
-            # 获取消息相关信息
-            cmsg: ChatMessage = context.get("msg", None)
-            
-            # 检查是否在私聊中指定了用户或群组
-            is_group = context.get("isgroup", False)
-            group_name = None
-            target_user = None
-
-            # 连接数据库（移到这里，统一管理连接）
+            # 连接数据库
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
             try:
+                # 保存原始时间用于比较
+                original_time = time_str
+                
+                # 检查并调整时间
+                adjusted_time = self._adjust_time_for_conflicts(time_str, circle_str, cursor)
+                if adjusted_time is None:
+                    return "无法调整时间，可能已超出有效范围"
+                if adjusted_time != time_str:
+                    time_str = adjusted_time
+                    logger.info(f"[DifyTask] 任务时间已自动调整为: {time_str} 以避免冲突")
+
+                # 获取消息相关信息
+                cmsg: ChatMessage = context.get("msg", None)
+                
+                # 检查是否在私聊中指定了用户或群组
+                is_group = context.get("isgroup", False)
+                group_name = None
+                target_user = None
+
                 if not is_group:
                     # 检查是否指定了用户
                     if event_str.startswith("u["):
@@ -914,6 +925,9 @@ Cron表达式格式（高级）：
                 ))
                 
                 conn.commit()
+                # 使用原始时间来判断是否发生了调整
+                if time_str != original_time:
+                    return f"已创建任务（时间自动调整）: [{task_id}] {time_str} {circle_str} {event_str}"
                 return f"已创建任务: [{task_id}] {time_str} {circle_str} {event_str}"
 
             finally:
@@ -1243,3 +1257,43 @@ Cron表达式格式（高级）：
             # 命令格式错误
             e_context['reply'] = Reply(ReplyType.TEXT, "命令格式错误，请查看帮助信息")
             e_context.action = EventAction.BREAK_PASS 
+
+    def _adjust_time_for_conflicts(self, time_str: str, circle_str: str, cursor) -> str:
+        """调整时间避免冲突，返回调整后的时间"""
+        try:
+            # 解析原始时间
+            hour, minute = time_str.replace('：', ':').split(':')
+            hour = int(hour)
+            minute = int(minute)
+            
+            # 获取所有任务的时间
+            cursor.execute('SELECT time, circle FROM tasks')
+            existing_tasks = cursor.fetchall()
+            
+            # 检查是否存在冲突
+            while True:
+                time_conflicts = False
+                for task_time, task_circle in existing_tasks:
+                    # 检查时间是否冲突
+                    if task_time == f"{hour:02d}:{minute:02d}" or \
+                       task_time == f"{hour:02d}：{minute:02d}":
+                        time_conflicts = True
+                        break
+                
+                if not time_conflicts:
+                    break
+                
+                # 时间冲突，分钟数+1
+                minute += 1
+                if minute >= 60:
+                    hour += 1
+                    minute = 0
+                if hour >= 24:
+                    hour = 0
+            
+            # 返回调整后的时间
+            return f"{hour:02d}:{minute:02d}"
+            
+        except Exception as e:
+            logger.error(f"[DifyTask] 调整时间失败: {e}")
+            return None 
