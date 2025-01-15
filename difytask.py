@@ -67,6 +67,15 @@ class DifyTask(Plugin):
                 with open(config_path, "r", encoding="utf-8") as f:
                     self.plugin_config = json.load(f)
             
+            # 添加默认配置
+            if not self.plugin_config.get("task_list_password"):
+                self.plugin_config["task_list_password"] = "123456"
+            if not self.plugin_config.get("task_capacity"):
+                self.plugin_config["task_capacity"] = 100
+            
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(self.plugin_config, f, indent=4)
+            
             # 更新群组信息
             self._update_groups()
             
@@ -257,6 +266,15 @@ class DifyTask(Plugin):
                 )
             ''')
             
+            # 新增：创建联系人信息表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS contacts (
+                    wxid TEXT PRIMARY KEY,
+                    nickname TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            ''')
+            
             conn.commit()
             conn.close()
             logger.info("[DifyTask] Database initialized")
@@ -264,21 +282,20 @@ class DifyTask(Plugin):
             logger.error(f"[DifyTask] Failed to init database: {e}")
 
     def _update_groups(self):
-        """更新群组信息"""
+        """更新群组和联系人信息"""
         try:
-            # 获取所有群聊的 wxid 列表
+            # 获取所有群聊和联系人列表
             response = self.client.fetch_contacts_list(self.app_id)
             logger.debug(f"[DifyTask] fetch_contacts_list response: {response}")
 
             if response.get('ret') == 200:
-                chatrooms = response.get('data', {}).get('chatrooms', [])
-                logger.info(f"[DifyTask] Total chatrooms found: {len(chatrooms)}")
-                
-                # 获取每个群的详细信息
+                current_time = int(time.time())
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
-                current_time = int(time.time())
                 
+                # 处理群组信息（保持原有逻辑）
+                chatrooms = response.get('data', {}).get('chatrooms', [])
+                logger.info(f"[DifyTask] Total chatrooms found: {len(chatrooms)}")
                 for chatroom_id in chatrooms:
                     try:
                         # 获取群信息
@@ -291,27 +308,56 @@ class DifyTask(Plugin):
                             
                             # 更新数据库
                             cursor.execute('''
-                            INSERT OR REPLACE INTO groups (wxid, nickname, updated_at)
-                            VALUES (?, ?, ?)
+                                INSERT OR REPLACE INTO groups (wxid, nickname, updated_at)
+                                VALUES (?, ?, ?)
                             ''', (chatroom_id, nickname, current_time))
-                            
-                            logger.debug(f"[DifyTask] Updated group info: {chatroom_id} - {nickname}")
                     except Exception as e:
                         logger.error(f"[DifyTask] Failed to update group {chatroom_id}: {e}")
-                        continue
                 
-                # 清理超过7天未更新的群信息
+                # 新增：处理联系人信息
+                friends = response.get('data', {}).get('friends', [])
+                logger.info(f"[DifyTask] Total friends found: {len(friends)}")
+                if friends:
+                    try:
+                        # 批量获取联系人信息
+                        friend_info_response = requests.post(
+                            f"{conf().get('gewechat_base_url')}/contacts/getBriefInfo",
+                            json={
+                                "appId": conf().get('gewechat_app_id'),
+                                "wxids": friends
+                            },
+                            headers={
+                                "X-GEWE-TOKEN": conf().get('gewechat_token')
+                            }
+                        )
+                        
+                        if friend_info_response.status_code == 200:
+                            data = friend_info_response.json()
+                            if data.get('ret') == 200 and data.get('data'):
+                                for contact in data['data']:
+                                    wxid = contact.get('userName')
+                                    nickname = contact.get('nickName', '')
+                                    if wxid:
+                                        cursor.execute('''
+                                            INSERT OR REPLACE INTO contacts (wxid, nickname, updated_at)
+                                            VALUES (?, ?, ?)
+                                        ''', (wxid, nickname, current_time))
+                    except Exception as e:
+                        logger.error(f"[DifyTask] Failed to update contacts: {e}")
+                
+                # 清理过期数据（保持原有逻辑并添加联系人清理）
                 week_ago = current_time - 7 * 24 * 3600
                 cursor.execute('DELETE FROM groups WHERE updated_at < ?', (week_ago,))
+                cursor.execute('DELETE FROM contacts WHERE updated_at < ?', (week_ago,))
                 
                 conn.commit()
                 conn.close()
-                logger.info("[DifyTask] Groups info updated")
+                logger.info("[DifyTask] Groups and contacts info updated")
             else:
                 logger.error(f"[DifyTask] Failed to fetch contacts list: {response}")
                 
         except Exception as e:
-            logger.error(f"[DifyTask] Failed to update groups: {e}")
+            logger.error(f"[DifyTask] Failed to update groups and contacts: {e}")
 
     def get_help_text(self, **kwargs):
         return f"""定时任务插件使用说明:
@@ -622,126 +668,228 @@ Cron表达式格式（高级）：
             # 获取消息相关信息
             cmsg: ChatMessage = context.get("msg", None)
             
-            # 如果是cron表达式，直接验证cron格式
-            if circle_str.startswith("cron[") and circle_str.endswith("]"):
-                cron_exp = circle_str[5:-1].strip()  # 移除前后空格
-                logger.debug(f"[DifyTask] 解析cron表达式: {cron_exp}")
-                try:
-                    # 检查格式：必须是5个部分
-                    parts = cron_exp.split()
-                    logger.debug(f"[DifyTask] cron表达式分割结果: {parts}")
-                    if len(parts) != 5:
-                        return "cron表达式必须包含5个部分：分 时 日 月 周，例如：cron[0 9 * * 1-5]"
-                    croniter(cron_exp)
-                    time_str = "cron"  # 对于cron表达式，time_str不需要验证
-                except ValueError as e:
-                    logger.error(f"[DifyTask] cron表达式数值错误: {e}")
-                    return f"cron表达式数值错误: {str(e)}"
-                except Exception as e:
-                    logger.error(f"[DifyTask] cron表达式验证失败: {e}")
-                    return "cron表达式格式错误，正确格式为：cron[分 时 日 月 周]，例如：cron[0 9 * * 1-5]"
-            else:
-                # 验证时间格式
-                if not self._validate_time_format(time_str):
-                    logger.debug("[DifyTask] 时间格式验证失败")
-                    return "时间格式错误，请使用 HH:mm 格式，例如：09:30"
-                
-                # 验证周期格式
-                if not self._validate_circle_format(circle_str):
-                    logger.debug("[DifyTask] 周期格式验证失败")
-                    return "周期格式错误，支持：每天、每周x、工作日、YYYY-MM-DD、今天、明天、后天"
-
-            # 转换为cron表达式
-            cron_exp = self._convert_to_cron(circle_str, time_str)
-            if not cron_exp:
-                return "转换cron表达式失败"
-                
-            # 生成任务ID
-            task_id = self._generate_task_id()
-            logger.debug(f"[DifyTask] 生成任务ID: {task_id}")
-            
-            # 获取消息相关信息
-            cmsg: ChatMessage = context.get("msg", None)
-            logger.debug(f"[DifyTask] 原始消息对象: {cmsg}")
-            msg_info = {}
-            
-            # 检查是否在私聊中指定了群名
+            # 检查是否在私聊中指定了用户或群组
             is_group = context.get("isgroup", False)
             group_name = None
-            if not is_group and event_str.startswith("g["):
-                # 从事件内容中提取群名，格式：g[群名]其他内容
-                match = re.match(r'g\[([^\]]+)\](.*)', event_str)
-                if match:
-                    group_name = match.group(1)
-                    event_str = match.group(2).strip()  # 移除群名标记，保留实际内容
-                    logger.debug(f"[DifyTask] 从私聊中提取群名: {group_name}, 实际内容: {event_str}")
-                    
-                    # 查询群组信息
-                    conn = sqlite3.connect(self.db_path)
-                    cursor = conn.cursor()
-                    cursor.execute('SELECT wxid FROM groups WHERE nickname = ?', (group_name,))
-                    result = cursor.fetchone()
-                    conn.close()
-                    
-                    if result:
-                        group_wxid = result[0]
-                        is_group = True
-                        # 更新消息信息，将群ID设置为from_user_id
-                        if cmsg:
-                            msg_info = {
-                                "from_user_id": group_wxid,  # 使用群ID
-                                "actual_user_id": cmsg.from_user_id,  # 保留原始发送者ID
-                                "to_user_id": cmsg.to_user_id,
-                                "create_time": cmsg.create_time,
-                                "is_group": True
-                            }
-                        logger.debug(f"[DifyTask] 找到群组: {group_name}, wxid: {group_wxid}")
-                    else:
-                        return f"未找到群组: {group_name}"
-            else:
-                # 常规消息处理
-                if cmsg:
-                    msg_info = {
-                        "from_user_id": cmsg.from_user_id,
-                        "actual_user_id": getattr(cmsg, "actual_user_id", cmsg.from_user_id),
-                        "to_user_id": cmsg.to_user_id,
-                        "create_time": cmsg.create_time,
-                        "is_group": is_group
-                    }
-            
-            logger.debug(f"[DifyTask] 处理后的消息信息: {msg_info}")
-            
-            # 构建上下文信息
-            context_info = {
-                "type": context.type.name,
-                "content": event_str,
-                "isgroup": is_group,
-                "msg": msg_info
-            }
-            logger.debug(f"[DifyTask] 上下文信息: {context_info}")
-            
-            # 保存到数据库
+            target_user = None
+
+            # 连接数据库（移到这里，统一管理连接）
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO tasks (id, time, circle, cron, event, context, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                task_id,
-                time_str,
-                circle_str,
-                cron_exp,
-                event_str,
-                json.dumps(context_info),
-                int(time.time())
-            ))
-            
-            conn.commit()
-            conn.close()
-            
-            logger.debug(f"[DifyTask] 任务创建成功: {task_id}")
-            return f"已创建任务: [{task_id}] {time_str} {circle_str} {event_str}"
+
+            try:
+                if not is_group:
+                    # 检查是否指定了用户
+                    if event_str.startswith("u["):
+                        # 从事件内容中提取用户名和密码，格式：u[用户名] 密码 其他内容
+                        match = re.match(r'u\[([^\]]+)\]\s+(\S+)\s+(.*)', event_str)
+                        if match:
+                            user_name = match.group(1)
+                            input_password = match.group(2)
+                            event_str = match.group(3).strip()
+                            logger.debug(f"[DifyTask] 从私聊中提取用户名: {user_name}, 实际内容: {event_str}")
+                            
+                            # 验证密码
+                            password = self.plugin_config.get("task_list_password")
+                            if not password:
+                                return "未配置任务密码，无法创建指定用户的任务"
+                            if input_password != password:
+                                return "密码错误"
+                            
+                            # 查询用户信息
+                            cursor.execute('SELECT wxid FROM contacts WHERE nickname = ?', (user_name,))
+                            result = cursor.fetchone()
+                            
+                            if result:
+                                target_user = result[0]
+                                # 更新消息信息
+                                if cmsg:
+                                    # 创建新的 ChatMessage 对象，而不是使用字典
+                                    new_msg = ChatMessage({})
+                                    new_msg.from_user_id = target_user
+                                    new_msg.actual_user_id = cmsg.from_user_id
+                                    new_msg.to_user_id = cmsg.to_user_id
+                                    new_msg.create_time = cmsg.create_time
+                                    new_msg.is_group = False
+                                    new_msg._prepared = True
+                                    # 使用 ChatMessage 对象更新 context
+                                    context["msg"] = new_msg
+                                    logger.debug(f"[DifyTask] 找到用户: {user_name}, wxid: {target_user}")
+                            else:
+                                return f"未找到用户: {user_name}"
+                        else:
+                            return "格式错误，正确格式：#task 时间 周期 u[用户名] 密码 任务内容"
+
+                # 如果是cron表达式，直接验证cron格式
+                if circle_str.startswith("cron[") and circle_str.endswith("]"):
+                    cron_exp = circle_str[5:-1].strip()  # 移除前后空格
+                    logger.debug(f"[DifyTask] 解析cron表达式: {cron_exp}")
+                    try:
+                        # 检查格式：必须是5个部分
+                        parts = cron_exp.split()
+                        logger.debug(f"[DifyTask] cron表达式分割结果: {parts}")
+                        if len(parts) != 5:
+                            return "cron表达式必须包含5个部分：分 时 日 月 周，例如：cron[0 9 * * 1-5]"
+                        croniter(cron_exp)
+                        time_str = "cron"  # 对于cron表达式，time_str不需要验证
+                    except ValueError as e:
+                        logger.error(f"[DifyTask] cron表达式数值错误: {e}")
+                        return f"cron表达式数值错误: {str(e)}"
+                    except Exception as e:
+                        logger.error(f"[DifyTask] cron表达式验证失败: {e}")
+                        return "cron表达式格式错误，正确格式为：cron[分 时 日 月 周]，例如：cron[0 9 * * 1-5]"
+                else:
+                    # 验证时间格式
+                    if not self._validate_time_format(time_str):
+                        logger.debug("[DifyTask] 时间格式验证失败")
+                        return "时间格式错误，请使用 HH:mm 格式，例如：09:30"
+                    
+                    # 验证周期格式
+                    if not self._validate_circle_format(circle_str):
+                        logger.debug("[DifyTask] 周期格式验证失败")
+                        return "周期格式错误，支持：每天、每周x、工作日、YYYY-MM-DD、今天、明天、后天"
+
+                # 转换为cron表达式
+                cron_exp = self._convert_to_cron(circle_str, time_str)
+                if not cron_exp:
+                    return "转换cron表达式失败"
+                    
+                # 生成任务ID
+                task_id = self._generate_task_id()
+                logger.debug(f"[DifyTask] 生成任务ID: {task_id}")
+                
+                # 获取消息相关信息
+                cmsg: ChatMessage = context.get("msg", None)
+                logger.debug(f"[DifyTask] 原始消息对象: {cmsg}")
+                msg_info = {}
+                
+                # 检查是否在私聊中指定了用户或群组
+                is_group = context.get("isgroup", False)
+                group_name = None
+                target_user = None
+
+                if not is_group:
+                    # 检查是否指定了用户
+                    if event_str.startswith("u["):
+                        # 从事件内容中提取用户名和密码，格式：u[用户名] 密码 其他内容
+                        match = re.match(r'u\[([^\]]+)\]\s+(\S+)\s+(.*)', event_str)
+                        if match:
+                            user_name = match.group(1)
+                            input_password = match.group(2)
+                            event_str = match.group(3).strip()
+                            logger.debug(f"[DifyTask] 从私聊中提取用户名: {user_name}, 实际内容: {event_str}")
+                            
+                            # 验证密码
+                            password = self.plugin_config.get("task_list_password")
+                            if not password:
+                                return "未配置任务密码，无法创建指定用户的任务"
+                            if input_password != password:
+                                return "密码错误"
+                            
+                            # 查询用户信息
+                            cursor.execute('SELECT wxid FROM contacts WHERE nickname = ?', (user_name,))
+                            result = cursor.fetchone()
+                            
+                            if result:
+                                target_user = result[0]
+                                # 更新消息信息
+                                if cmsg:
+                                    # 创建新的 ChatMessage 对象，而不是使用字典
+                                    new_msg = ChatMessage({})
+                                    new_msg.from_user_id = target_user
+                                    new_msg.actual_user_id = cmsg.from_user_id
+                                    new_msg.to_user_id = cmsg.to_user_id
+                                    new_msg.create_time = cmsg.create_time
+                                    new_msg.is_group = False
+                                    new_msg._prepared = True
+                                    # 使用 ChatMessage 对象更新 context
+                                    context["msg"] = new_msg
+                                    logger.debug(f"[DifyTask] 找到用户: {user_name}, wxid: {target_user}")
+                            else:
+                                return f"未找到用户: {user_name}"
+                        else:
+                            return "格式错误，正确格式：#task 时间 周期 u[用户名] 密码 任务内容"
+                    
+                    # 现有的群组处理代码
+                    elif event_str.startswith("g["):
+                        # 从事件内容中提取群名，格式：g[群名]其他内容
+                        match = re.match(r'g\[([^\]]+)\](.*)', event_str)
+                        if match:
+                            group_name = match.group(1)
+                            event_str = match.group(2).strip()  # 移除群名标记，保留实际内容
+                            logger.debug(f"[DifyTask] 从私聊中提取群名: {group_name}, 实际内容: {event_str}")
+                            
+                            # 查询群组信息
+                            cursor.execute('SELECT wxid FROM groups WHERE nickname = ?', (group_name,))
+                            result = cursor.fetchone()
+                            
+                            if result:
+                                group_wxid = result[0]
+                                is_group = True
+                                # 更新消息信息，将群ID设置为from_user_id
+                                if cmsg:
+                                    msg_info = {
+                                        "from_user_id": group_wxid,  # 使用群ID
+                                        "actual_user_id": cmsg.from_user_id,  # 保留原始发送者ID
+                                        "to_user_id": cmsg.to_user_id,
+                                        "create_time": cmsg.create_time,
+                                        "is_group": True
+                                    }
+                                logger.debug(f"[DifyTask] 找到群组: {group_name}, wxid: {group_wxid}")
+                            else:
+                                return f"未找到群组: {group_name}"
+                        else:
+                            return "格式错误，正确格式：#task 时间 周期 g[群名] 任务内容"
+                    else:
+                        # 常规消息处理
+                        if cmsg:
+                            msg_info = {
+                                "from_user_id": cmsg.from_user_id,
+                                "actual_user_id": getattr(cmsg, "actual_user_id", cmsg.from_user_id),
+                                "to_user_id": cmsg.to_user_id,
+                                "create_time": cmsg.create_time,
+                                "is_group": is_group
+                            }
+                
+                logger.debug(f"[DifyTask] 处理后的消息信息: {msg_info}")
+                
+                # 构建上下文信息
+                context_info = {
+                    "type": context.type.name,
+                    "content": event_str,
+                    "isgroup": is_group,
+                    "msg": msg_info if 'msg_info' in locals() else context.get("msg", {})
+                }
+                logger.debug(f"[DifyTask] 上下文信息: {context_info}")
+                
+                # 检查任务数量是否超出限制
+                cursor.execute('SELECT COUNT(*) FROM tasks')
+                task_count = cursor.fetchone()[0]
+                task_capacity = self.plugin_config.get("task_capacity", 100)  # 从插件配置中获取，默认100个
+                if task_count >= task_capacity:
+                    return f"任务数量已达上限（{task_capacity}），请先删除一些任务"
+                
+                # 保存到数据库
+                cursor.execute('''
+                    INSERT INTO tasks (id, time, circle, cron, event, context, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    task_id,
+                    time_str,
+                    circle_str,
+                    cron_exp,
+                    event_str,
+                    json.dumps(context_info),
+                    int(time.time())
+                ))
+                
+                conn.commit()
+                return f"已创建任务: [{task_id}] {time_str} {circle_str} {event_str}"
+
+            finally:
+                # 确保数据库连接被正确关闭
+                conn.close()
+
         except Exception as e:
             logger.error(f"[DifyTask] 创建任务失败: {e}")
             return f"创建任务失败: {str(e)}"
