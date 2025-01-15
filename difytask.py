@@ -812,12 +812,20 @@ Cron表达式格式（高级）：
                     
                     # 现有的群组处理代码
                     elif event_str.startswith("g["):
-                        # 从事件内容中提取群名，格式：g[群名]其他内容
-                        match = re.match(r'g\[([^\]]+)\](.*)', event_str)
+                        # 从事件内容中提取群名和密码，格式：g[群名] 密码 其他内容
+                        match = re.match(r'g\[([^\]]+)\]\s+(\S+)\s+(.*)', event_str)
                         if match:
                             group_name = match.group(1)
-                            event_str = match.group(2).strip()  # 移除群名标记，保留实际内容
+                            input_password = match.group(2)
+                            event_str = match.group(3).strip()
                             logger.debug(f"[DifyTask] 从私聊中提取群名: {group_name}, 实际内容: {event_str}")
+                            
+                            # 验证密码
+                            password = self.plugin_config.get("task_list_password")
+                            if not password:
+                                return "未配置任务密码，无法创建群组任务"
+                            if input_password != password:
+                                return "密码错误"
                             
                             # 查询群组信息
                             cursor.execute('SELECT wxid FROM groups WHERE nickname = ?', (group_name,))
@@ -839,7 +847,7 @@ Cron表达式格式（高级）：
                             else:
                                 return f"未找到群组: {group_name}"
                         else:
-                            return "格式错误，正确格式：#task 时间 周期 g[群名] 任务内容"
+                            return "格式错误，正确格式：#task 时间 周期 g[群名] 密码 任务内容"
                     else:
                         # 常规消息处理
                         if cmsg:
