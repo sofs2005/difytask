@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.2.5",
+    version="1.2.6",
     author="sofs2005",
 )
 class DifyTask(Plugin):
