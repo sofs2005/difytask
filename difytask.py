@@ -979,8 +979,8 @@ Cron表达式格式（高级）：
                     # 检查是否是一次性任务
                     if len(circle_str) == 10:  # YYYY-MM-DD 格式
                         task_date = datetime.strptime(f"{circle_str} {time_str}", "%Y-%m-%d %H:%M")
-                        # 如果任务时间已过期24小时，则删除
-                        if now - task_date > timedelta(hours=24):
+                        # 如果任务时间已过期就删除
+                        if now > task_date:
                             cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
                             logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str}")
                     # 检查其他一次性任务（今天、明天、后天）
@@ -991,8 +991,8 @@ Cron表达式格式（高级）：
                                                         minute=int(time_str.split(':')[1]), 
                                                         second=0, microsecond=0)
                         task_date = task_date + timedelta(days=days_map[circle_str])
-                        # 如果任务时间已过期24小时，则删除
-                        if now - task_date > timedelta(hours=24):
+                        # 如果任务时间已过期就删除
+                        if now > task_date:
                             cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
                             logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str}")
                 except Exception as e:
