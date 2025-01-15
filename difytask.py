@@ -489,39 +489,39 @@ Cron表达式格式（高级）：
             return "获取任务列表失败"
 
     def _validate_time_format(self, time_str):
-        """验证时间格式 HH:mm 并检查是否过期"""
+        """验证时间格式 HH:mm"""
         try:
-            logger.debug(f"[DifyTask] 验证时间格式: {time_str}")
+            # 检查格式
+            if ':' not in time_str and '：' not in time_str:
+                return False, "时间格式错误，请使用 HH:mm 格式"
             
-            # 检查格式，支持中英文冒号
-            if len(time_str) != 5 or (time_str[2] != ':' and time_str[2] != '：'):
-                logger.debug("[DifyTask] 时间格式长度错误或分隔符不是':'")
-                return False, "时间格式错误"
+            # 统一处理中文冒号
+            time_str = time_str.replace('：', ':')
             
-            # 分割小时和分钟，同时处理中英文冒号
-            hour, minute = time_str.replace('：', ':').split(':')
+            # 解析时间
+            hour, minute = time_str.split(':')
             hour = int(hour)
             minute = int(minute)
             
             # 验证范围
             if hour < 0 or hour > 23:
-                logger.debug("[DifyTask] 小时超出范围")
                 return False, "小时必须在0-23之间"
             if minute < 0 or minute > 59:
-                logger.debug("[DifyTask] 分钟超出范围")
                 return False, "分钟必须在0-59之间"
             
             # 检查时间是否过期
             now = datetime.now()
-            if hour < now.hour or (hour == now.hour and minute <= now.minute):
+            if hour < now.hour or (hour == now.hour and minute < now.minute):
                 # 仅当指定"今天"时才提示过期
                 return True, "today_expired"
             
             logger.debug("[DifyTask] 时间格式验证通过")
             return True, None
             
+        except ValueError:
+            return False, "时间格式错误，请使用 HH:mm 格式，例如：09:30"
         except Exception as e:
-            logger.error(f"[DifyTask] 时间格式验证异常: {e}")
+            logger.error(f"[DifyTask] 时间格式验证失败: {e}")
             return False, "时间格式验证失败"
 
     def _convert_to_cron(self, circle_str, time_str):
@@ -668,14 +668,24 @@ Cron表达式格式（高级）：
     def _create_task(self, time_str, circle_str, event_str, context):
         """创建任务"""
         try:
-            # 验证时间格式
-            is_valid, error_msg = self._validate_time_format(time_str)
-            if not is_valid:
-                return error_msg
-            elif error_msg == "today_expired":
-                # 检查是否是具体日期（今天、明天、后天、YYYY-MM-DD）
+            # 再次验证时间格式（双重检查）
+            if not circle_str.startswith("cron["):  # 非 cron 表达式才需要验证时间
+                is_valid, error_msg = self._validate_time_format(time_str)
+                if not is_valid:
+                    return error_msg
+                
+                # 验证时间值
+                hour, minute = time_str.replace('：', ':').split(':')
+                hour = int(hour)
+                minute = int(minute)
+                
+                if hour > 23 or minute > 59:
+                    return "时间格式错误：小时必须在0-23之间，分钟必须在0-59之间"
+                
+                # 检查是否过期
                 if circle_str == "今天":
-                    return "指定的时间已过期，请设置未来的时间"
+                    if hour < datetime.now().hour or (hour == datetime.now().hour and minute < datetime.now().minute):
+                        return "指定的时间已过期，请设置未来的时间"
                 elif circle_str == "明天" or circle_str == "后天":
                     # 这两种情况不需要检查，因为必定是未来时间
                     pass
@@ -686,23 +696,32 @@ Cron表达式格式（高级）：
                             return "指定的时间已过期，请设置未来的时间"
                     except ValueError:
                         return "日期格式错误"
-
+            
             # 连接数据库
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-
+            
             try:
-                # 保存原始时间用于比较
+                 # 保存原始时间用于比较
                 original_time = time_str
+                # 检查任务数量是否超出限制
+                cursor.execute('SELECT COUNT(*) FROM tasks')
+                task_count = cursor.fetchone()[0]
+                task_capacity = self.plugin_config.get("task_capacity", 100)
+                if task_count >= task_capacity:
+                    return f"任务数量已达上限（{task_capacity}），请先删除一些任务"
                 
-                # 检查并调整时间
+                # 检查并调整时间以避免冲突
                 adjusted_time = self._adjust_time_for_conflicts(time_str, circle_str, cursor)
                 if adjusted_time is None:
                     return "无法调整时间，可能已超出有效范围"
                 if adjusted_time != time_str:
                     time_str = adjusted_time
                     logger.info(f"[DifyTask] 任务时间已自动调整为: {time_str} 以避免冲突")
-
+                # 保存到数据库前的最后验证
+                if not self._is_valid_task_data(time_str, circle_str, event_str):
+                    return "任务数据验证失败，请检查输入"
+                    
                 # 获取消息相关信息
                 cmsg: ChatMessage = context.get("msg", None)
                 
@@ -902,13 +921,6 @@ Cron表达式格式（高级）：
                     "msg": msg_info if 'msg_info' in locals() else context.get("msg", {})
                 }
                 logger.debug(f"[DifyTask] 上下文信息: {context_info}")
-                
-                # 检查任务数量是否超出限制
-                cursor.execute('SELECT COUNT(*) FROM tasks')
-                task_count = cursor.fetchone()[0]
-                task_capacity = self.plugin_config.get("task_capacity", 100)  # 从插件配置中获取，默认100个
-                if task_count >= task_capacity:
-                    return f"任务数量已达上限（{task_capacity}），请先删除一些任务"
                 
                 # 保存到数据库
                 cursor.execute('''
@@ -1177,9 +1189,7 @@ Cron表达式格式（高级）：
         
         # 处理命令
         if content.startswith(self.command_prefix):
-            logger.debug(f"[DifyTask] 收到命令: {content}")
-            # 移除指令前缀
-            command = content.replace(self.command_prefix, "", 1).strip()
+            command = content[len(self.command_prefix):].strip()
             
             # 空命令显示帮助
             if not command:
@@ -1187,7 +1197,7 @@ Cron表达式格式（高级）：
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 处理任务列表命令
+            # 1. 先处理特殊命令（任务列表和取消任务）
             if command.startswith("任务列表"):
                 # 检查是否提供了密码
                 parts = command.split()
@@ -1215,7 +1225,6 @@ Cron表达式格式（高级）：
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 取消任务
             if command.startswith("取消任务 "):
                 task_id = command.replace("取消任务 ", "", 1).strip()
                 result = self._delete_task(task_id)
@@ -1223,64 +1232,94 @@ Cron表达式格式（高级）：
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 创建任务
-            # 先检查是否是 cron 表达式
+            # 2. 处理 cron 表达式命令
             if "cron[" in command:
-                # 使用正则表达式匹配 cron 表达式和事件内容
-                import re
-                match = re.match(r'cron\[(.*?)\]\s*(.*)', command)
-                if match:
-                    cron_exp = match.group(1).strip()
-                    event_str = match.group(2).strip()
-                    if not event_str:
-                        e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
-                        e_context.action = EventAction.BREAK_PASS
-                        return
-                    result = self._create_task("cron", f"cron[{cron_exp}]", event_str, e_context['context'])
-                    e_context['reply'] = Reply(ReplyType.TEXT, result)
+                # 验证命令格式（不需要再导入 re）
+                match = re.match(r'cron\[(.*?)\](?:\s+g\[(.*?)\])?\s+(.*)', command)
+                if not match:
+                    e_context['reply'] = Reply(ReplyType.TEXT, "命令格式错误，正确格式：\n$time cron[分 时 日 月 周] 事件内容\n或\n$time cron[分 时 日 月 周] g[群组] 事件内容")
                     e_context.action = EventAction.BREAK_PASS
                     return
-                else:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "cron表达式格式错误，正确格式：$time cron[分 时 日 月 周] 事件内容")
+                    
+                cron_exp = match.group(1).strip()
+                group_name = match.group(2)  # 可能是 None
+                event_content = match.group(3).strip()
+                
+                # 验证事件内容不为空
+                if not event_content:
+                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
                     e_context.action = EventAction.BREAK_PASS
                     return
-            
-            # 处理普通定时任务
-            parts = command.split(" ", 2)
-            if len(parts) == 3:
-                circle_str, time_str, event_str = parts
-                result = self._create_task(time_str, circle_str, event_str, e_context['context'])
+                    
+                # 验证 cron 表达式格式
+                if not self._validate_cron_format(cron_exp):
+                    e_context['reply'] = Reply(ReplyType.TEXT, "cron表达式格式错误，正确格式为：分 时 日 月 周\n例如：*/15 9-18 * * 1-5")
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                    
+                # 构建完整的事件字符串
+                event_str = f"g[{group_name}] {event_content}" if group_name else event_content
+                
+                # 创建任务
+                result = self._create_task("00:00", f"cron[{cron_exp}]", event_str, e_context['context'])
                 e_context['reply'] = Reply(ReplyType.TEXT, result)
                 e_context.action = EventAction.BREAK_PASS
                 return
+                
+            # 3. 处理普通定时任务
+            match = re.match(r'([^\s]+)\s+([^\s]+)(?:\s+g\[(.*?)\])?\s+(.*)', command)
+            if not match:
+                e_context['reply'] = Reply(ReplyType.TEXT, "命令格式错误，正确格式：\n周期 时间 事件内容\n或\n周期 时间 g[群组] 事件内容")
+                e_context.action = EventAction.BREAK_PASS
+                return
+                
+            circle_str = match.group(1).strip()
+            time_str = match.group(2).strip()
+            group_name = match.group(3)  # 可能是 None
+            event_content = match.group(4).strip()
             
-            # 命令格式错误
-            e_context['reply'] = Reply(ReplyType.TEXT, "命令格式错误，请查看帮助信息")
-            e_context.action = EventAction.BREAK_PASS 
+            # 验证事件内容不为空
+            if not event_content:
+                e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
+                e_context.action = EventAction.BREAK_PASS
+                return
+                
+            # 验证基本格式
+            is_valid, error_msg = self._validate_normal_format(circle_str, time_str)
+            if not is_valid:
+                e_context['reply'] = Reply(ReplyType.TEXT, error_msg)
+                e_context.action = EventAction.BREAK_PASS
+                return
+                
+            # 构建完整的事件字符串
+            event_str = f"g[{group_name}] {event_content}" if group_name else event_content
+            
+            # 创建任务
+            result = self._create_task(time_str, circle_str, event_str, e_context['context'])
+            e_context['reply'] = Reply(ReplyType.TEXT, result)
+            e_context.action = EventAction.BREAK_PASS
 
     def _adjust_time_for_conflicts(self, time_str: str, circle_str: str, cursor) -> str:
         """调整时间避免冲突，返回调整后的时间"""
         try:
+            # 如果是cron表达式，不需要调整
+            if circle_str.startswith("cron["):
+                return time_str
+            
             # 解析原始时间
             hour, minute = time_str.replace('：', ':').split(':')
             hour = int(hour)
             minute = int(minute)
             
             # 获取所有任务的时间
-            cursor.execute('SELECT time, circle FROM tasks')
+            cursor.execute('SELECT time FROM tasks')
             existing_tasks = cursor.fetchall()
+            logger.debug(f"[DifyTask] 当前所有任务时间: {existing_tasks}")
             
             # 检查是否存在冲突
             while True:
-                time_conflicts = False
-                for task_time, task_circle in existing_tasks:
-                    # 检查时间是否冲突
-                    if task_time == f"{hour:02d}:{minute:02d}" or \
-                       task_time == f"{hour:02d}：{minute:02d}":
-                        time_conflicts = True
-                        break
-                
-                if not time_conflicts:
+                current_time = f"{hour:02d}:{minute:02d}"
+                if not any(task[0] == current_time for task in existing_tasks):
                     break
                 
                 # 时间冲突，分钟数+1
@@ -1289,11 +1328,84 @@ Cron表达式格式（高级）：
                     hour += 1
                     minute = 0
                 if hour >= 24:
-                    hour = 0
+                    return None  # 无法调整
+                
+                logger.debug(f"[DifyTask] 尝试调整时间到: {hour:02d}:{minute:02d}")
             
             # 返回调整后的时间
             return f"{hour:02d}:{minute:02d}"
             
         except Exception as e:
             logger.error(f"[DifyTask] 调整时间失败: {e}")
-            return None 
+            return None
+
+    def _validate_cron_format(self, cron_exp):
+        """验证 cron 表达式的基本格式"""
+        try:
+            parts = cron_exp.split()
+            if len(parts) != 5:
+                logger.debug(f"[DifyTask] cron表达式必须包含5个部分，当前: {len(parts)}")
+                return False
+            
+            # 只验证格式，不验证具体值
+            return True
+        except Exception as e:
+            logger.debug(f"[DifyTask] cron表达式格式验证失败: {e}")
+            return False 
+
+    def _validate_normal_format(self, circle_str, time_str):
+        """验证普通定时任务的基本格式"""
+        try:
+            # 1. 验证时间格式 HH:mm
+            if ':' not in time_str and '：' not in time_str:
+                logger.debug(f"[DifyTask] 时间格式错误: {time_str}")
+                return False, "时间格式错误，请使用 HH:mm 格式"
+            
+            # 2. 验证周期格式
+            valid_circles = ["每天", "工作日", "今天", "明天", "后天"]
+            if circle_str in valid_circles:
+                return True, None
+            
+            # 每周几
+            week_days = ["一", "二", "三", "四", "五", "六", "日"]
+            if circle_str.startswith("每周"):
+                day = circle_str[2:]
+                if day in week_days:
+                    return True, None
+                return False, "每周后面必须是：一、二、三、四、五、六、日"
+            
+            # 具体日期 YYYY-MM-DD
+            if len(circle_str) == 10:
+                if not re.match(r'^\d{4}-\d{2}-\d{2}$', circle_str):
+                    return False, "日期格式错误，正确格式：YYYY-MM-DD"
+                return True, None
+            
+            return False, "周期格式错误，支持：每天、每周x、工作日、YYYY-MM-DD、今天、明天、后天"
+        except Exception as e:
+            logger.debug(f"[DifyTask] 格式验证失败: {e}")
+            return False, f"格式验证失败: {str(e)}" 
+
+    def _is_valid_task_data(self, time_str, circle_str, event_str):
+        """验证任务数据的有效性"""
+        try:
+            if circle_str.startswith("cron["):
+                # 验证 cron 表达式
+                cron_exp = circle_str[5:-1].strip()
+                try:
+                    croniter(cron_exp)
+                    return True
+                except:
+                    return False
+            else:
+                # 验证时间格式
+                is_valid, _ = self._validate_time_format(time_str)
+                if not is_valid:
+                    return False
+                    
+                # 验证周期格式
+                if not self._validate_circle_format(circle_str):
+                    return False
+                    
+            return True
+        except:
+            return False 
