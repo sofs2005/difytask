@@ -489,37 +489,40 @@ Cron表达式格式（高级）：
             return "获取任务列表失败"
 
     def _validate_time_format(self, time_str):
-        """验证时间格式 HH:mm"""
+        """验证时间格式 HH:mm 并检查是否过期"""
         try:
             logger.debug(f"[DifyTask] 验证时间格式: {time_str}")
             
-            # 检查格式
-            if len(time_str) != 5 or time_str[2] != ':':
+            # 检查格式，支持中英文冒号
+            if len(time_str) != 5 or (time_str[2] != ':' and time_str[2] != '：'):
                 logger.debug("[DifyTask] 时间格式长度错误或分隔符不是':'")
-                return False
+                return False, "时间格式错误"
             
-            # 分割小时和分钟
-            hour, minute = time_str.split(':')
-            logger.debug(f"[DifyTask] 时间分割结果: hour={hour}, minute={minute}")
-            
-            # 转换为整数
+            # 分割小时和分钟，同时处理中英文冒号
+            hour, minute = time_str.replace('：', ':').split(':')
             hour = int(hour)
             minute = int(minute)
-            logger.debug(f"[DifyTask] 时间转换结果: hour={hour}, minute={minute}")
             
             # 验证范围
             if hour < 0 or hour > 23:
                 logger.debug("[DifyTask] 小时超出范围")
-                return False
+                return False, "小时必须在0-23之间"
             if minute < 0 or minute > 59:
                 logger.debug("[DifyTask] 分钟超出范围")
-                return False
+                return False, "分钟必须在0-59之间"
+            
+            # 检查时间是否过期
+            now = datetime.now()
+            if hour < now.hour or (hour == now.hour and minute <= now.minute):
+                # 仅当指定"今天"时才提示过期
+                return True, "today_expired"
             
             logger.debug("[DifyTask] 时间格式验证通过")
-            return True
+            return True, None
+            
         except Exception as e:
             logger.error(f"[DifyTask] 时间格式验证异常: {e}")
-            return False
+            return False, "时间格式验证失败"
 
     def _convert_to_cron(self, circle_str, time_str):
         """转换为cron表达式"""
@@ -665,6 +668,25 @@ Cron表达式格式（高级）：
     def _create_task(self, time_str, circle_str, event_str, context):
         """创建任务"""
         try:
+            # 验证时间格式
+            is_valid, error_msg = self._validate_time_format(time_str)
+            if not is_valid:
+                return error_msg
+            elif error_msg == "today_expired":
+                # 检查是否是具体日期（今天、明天、后天、YYYY-MM-DD）
+                if circle_str == "今天":
+                    return "指定的时间已过期，请设置未来的时间"
+                elif circle_str == "明天" or circle_str == "后天":
+                    # 这两种情况不需要检查，因为必定是未来时间
+                    pass
+                elif len(circle_str) == 10:  # YYYY-MM-DD 格式
+                    try:
+                        target_date = datetime.strptime(f"{circle_str} {time_str}", "%Y-%m-%d %H:%M")
+                        if target_date <= datetime.now():
+                            return "指定的时间已过期，请设置未来的时间"
+                    except ValueError:
+                        return "日期格式错误"
+
             # 获取消息相关信息
             cmsg: ChatMessage = context.get("msg", None)
             
