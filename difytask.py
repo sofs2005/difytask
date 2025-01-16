@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.3.3",
+    version="1.3.4",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -985,10 +985,13 @@ Cron表达式格式（高级）：
     def _delete_task(self, task_id):
         """删除任务"""
         try:
+            # 直接将输入转换为大写
+            task_id = task_id.upper()
+            
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # 先查询任务是否存在
+            # 直接使用大写的task_id查询
             cursor.execute('SELECT time, circle, event FROM tasks WHERE id = ?', (task_id,))
             task = cursor.fetchone()
             
@@ -996,7 +999,6 @@ Cron表达式格式（高级）：
                 conn.close()
                 return f"任务不存在: {task_id}"
             
-            # 删除任务
             cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
             conn.commit()
             conn.close()
