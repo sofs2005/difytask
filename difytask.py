@@ -72,6 +72,8 @@ class DifyTask(Plugin):
                 self.plugin_config["task_list_password"] = "123456"
             if not self.plugin_config.get("task_capacity"):
                 self.plugin_config["task_capacity"] = 100
+            if not self.plugin_config.get("time_adjust_interval"):
+                self.plugin_config["time_adjust_interval"] = 1
             
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(self.plugin_config, f, indent=4)
@@ -1306,6 +1308,10 @@ Cron表达式格式（高级）：
             if circle_str.startswith("cron["):
                 return time_str
             
+            # 从配置中获取时间调整间隔（分钟），默认为1分钟
+            time_adjust_interval = self.plugin_config.get("time_adjust_interval", 1)
+            logger.debug(f"[DifyTask] 时间调整间隔: {time_adjust_interval}分钟")
+            
             # 解析原始时间
             hour, minute = time_str.replace('：', ':').split(':')
             hour = int(hour)
@@ -1322,11 +1328,11 @@ Cron表达式格式（高级）：
                 if not any(task[0] == current_time for task in existing_tasks):
                     break
                 
-                # 时间冲突，分钟数+1
-                minute += 1
+                # 时间冲突，按配置的间隔增加分钟数
+                minute += time_adjust_interval
                 if minute >= 60:
-                    hour += 1
-                    minute = 0
+                    hour += (minute // 60)
+                    minute = minute % 60
                 if hour >= 24:
                     return None  # 无法调整
                 
