@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.3.2",
+    version="1.3.3",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -1014,38 +1014,32 @@ Cron表达式格式（高级）：
             cursor = conn.cursor()
             
             # 获取所有任务
-            cursor.execute('SELECT id, circle, time FROM tasks')
+            cursor.execute('SELECT id, circle, time, cron FROM tasks')
             tasks = cursor.fetchall()
             now = datetime.now()
+            deleted_count = 0
             
-            for task_id, circle_str, time_str in tasks:
+            for task_id, circle_str, time_str, cron_str in tasks:
                 try:
-                    # 检查是否是一次性任务
-                    if len(circle_str) == 10:  # YYYY-MM-DD 格式
-                        task_date = datetime.strptime(f"{circle_str} {time_str}", "%Y-%m-%d %H:%M")
-                        # 如果任务时间已过期就删除
-                        if now > task_date:
+                    # 检查是否是一次性任务（具体日期或今天明天后天）
+                    if len(circle_str) == 10 or circle_str in ["今天", "明天", "后天"]:
+                        # 从 cron 表达式获取日期
+                        task_date = datetime.strptime(cron_str.split()[3], "%Y-%m-%d")
+                        logger.debug(f"[DifyTask] 检查任务: {task_id}, 类型: {circle_str}, 日期: {task_date.date()}, 当前日期: {now.date()}")
+                        
+                        # 如果任务日期已过期就删除
+                        if now.date() > task_date.date():
                             cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str}")
-                    # 检查其他一次性任务（今天、明天、后天）
-                    elif circle_str in ["今天", "明天", "后天"]:
-                        # 解析任务时间
-                        days_map = {"今天": 0, "明天": 1, "后天": 2}
-                        task_date = datetime.now().replace(hour=int(time_str.split(':')[0]), 
-                                                        minute=int(time_str.split(':')[1]), 
-                                                        second=0, microsecond=0)
-                        task_date = task_date + timedelta(days=days_map[circle_str])
-                        # 如果任务时间已过期就删除
-                        if now > task_date:
-                            cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str}")
+                            deleted_count += 1
+                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str} (目标日期: {task_date.date()})")
+                            
                 except Exception as e:
                     logger.error(f"[DifyTask] 检查任务过期失败: {task_id} {e}")
                     continue
             
             conn.commit()
             conn.close()
-            logger.info("[DifyTask] 清理过期任务完成")
+            logger.info(f"[DifyTask] 清理过期任务完成，共删除 {deleted_count} 个任务")
         except Exception as e:
             logger.error(f"[DifyTask] 清理过期任务失败: {e}")
 
