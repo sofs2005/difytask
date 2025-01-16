@@ -802,7 +802,7 @@ Cron表达式格式（高级）：
                             else:
                                 return f"未找到用户: {user_name}"
                         else:
-                            return "格式错误，正确格式：#task 时间 周期 u[用户名] 密码 任务内容"
+                            return "格式错误，正确格式：$time 周期 时间 u[用户名] 密码 任务内容"
 
                 # 如果是cron表达式，直接验证cron格式
                 if circle_str.startswith("cron[") and circle_str.endswith("]"):
@@ -892,7 +892,7 @@ Cron表达式格式（高级）：
                             else:
                                 return f"未找到用户: {user_name}"
                         else:
-                            return "格式错误，正确格式：#task 时间 周期 u[用户名] 密码 任务内容"
+                            return "格式错误，正确格式：$time 周期 时间 u[用户名] 密码 任务内容"
                     
                     # 现有的群组处理代码
                     elif event_str.startswith("g["):
@@ -931,7 +931,7 @@ Cron表达式格式（高级）：
                             else:
                                 return f"未找到群组: {group_name}"
                         else:
-                            return "格式错误，正确格式：#task 时间 周期 g[群名] 密码 任务内容"
+                            return "格式错误，正确格式：$time 周期 时间 g[群名] 密码 任务内容"
                     else:
                         # 常规消息处理
                         if cmsg:
