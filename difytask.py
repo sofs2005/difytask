@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.3.4",
+    version="1.3.5",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -422,7 +422,7 @@ Cron表达式格式（高级）：
 {self.command_prefix} 任务列表 密码
 
 3. 取消任务
-{self.command_prefix} 取消任务 任务ID"""
+{self.command_prefix} 取消 任务ID"""
 
     def _get_user_nickname(self, user_id):
         """获取用户昵称"""
@@ -494,11 +494,13 @@ Cron表达式格式（高级）：
                     if display_name not in grouped_tasks:
                         grouped_tasks[display_name] = []
                     
+                    # 对于 cron 类型的任务，直接使用 circle（包含完整的 cron 表达式）
+                    display_time = circle if circle.startswith('cron[') else f"{circle} {time}"
+                    
                     # 添加任务信息
                     grouped_tasks[display_name].append({
                         'id': task_id,
-                        'time': time,
-                        'circle': circle,
+                        'display_time': display_time,
                         'event': event
                     })
                     
@@ -512,7 +514,7 @@ Cron表达式格式（高级）：
                 result += f"\n{group_name}\n"
                 result += "-" * 30 + "\n"
                 for task in tasks:
-                    result += f"[{task['id']}] {task['circle']} {task['time']} {task['event']}\n"
+                    result += f"[{task['id']}] {task['display_time']} {task['event']}\n"
                 result += "\n"
             
             return result.strip()
@@ -1217,7 +1219,9 @@ Cron表达式格式（高级）：
         
         # 处理命令
         if content.startswith(self.command_prefix):
-            command = content[len(self.command_prefix):].strip()
+            logger.debug(f"[DifyTask] 收到命令: {content}")
+            # 移除指令前缀
+            command = content.replace(self.command_prefix, "", 1).strip()
             
             # 空命令显示帮助
             if not command:
@@ -1253,8 +1257,9 @@ Cron表达式格式（高级）：
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            if command.startswith("取消任务 "):
-                task_id = command.replace("取消任务 ", "", 1).strip()
+            # 取消任务（修改这里）
+            if command.startswith("取消 "):
+                task_id = command.replace("取消 ", "", 1).strip()
                 result = self._delete_task(task_id)
                 e_context['reply'] = Reply(ReplyType.TEXT, result)
                 e_context.action = EventAction.BREAK_PASS
