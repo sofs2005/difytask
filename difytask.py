@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.3.1",
+    version="1.3.2",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -295,28 +295,51 @@ class DifyTask(Plugin):
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
                 
-                # 处理群组信息（保持原有逻辑）
+                # 处理群组信息
                 chatrooms = response.get('data', {}).get('chatrooms', [])
                 logger.info(f"[DifyTask] Total chatrooms found: {len(chatrooms)}")
                 for chatroom_id in chatrooms:
                     try:
                         # 获取群信息
                         group_info = self.client.get_chatroom_info(self.app_id, chatroom_id)
-                        logger.debug(f"[DifyTask] get_chatroom_info response for {chatroom_id}: {group_info}")
+                        logger.debug(f"[DifyTask] Group info for {chatroom_id}: {group_info}")
                         
                         if group_info.get('ret') == 200:
                             data = group_info.get('data', {})
                             nickname = data.get('nickName', '')
+                            
+                            # 如果昵称为空，使用群ID作为昵称
+                            if not nickname:
+                                nickname = f"群聊_{chatroom_id}"
+                                logger.warning(f"[DifyTask] Group {chatroom_id} has no nickname, using default name")
                             
                             # 更新数据库
                             cursor.execute('''
                                 INSERT OR REPLACE INTO groups (wxid, nickname, updated_at)
                                 VALUES (?, ?, ?)
                             ''', (chatroom_id, nickname, current_time))
+                        else:
+                            # API 调用成功但返回错误
+                            logger.warning(f"[DifyTask] Failed to get group info for {chatroom_id}, ret: {group_info.get('ret')}")
+                            # 使用默认名称
+                            cursor.execute('''
+                                INSERT OR REPLACE INTO groups (wxid, nickname, updated_at)
+                                VALUES (?, ?, ?)
+                            ''', (chatroom_id, f"群聊_{chatroom_id}", current_time))
+                            
                     except Exception as e:
-                        logger.error(f"[DifyTask] Failed to update group {chatroom_id}: {e}")
+                        logger.error(f"[DifyTask] Exception while updating group {chatroom_id}: {e}")
+                        # 发生异常时也使用默认名称
+                        try:
+                            cursor.execute('''
+                                INSERT OR REPLACE INTO groups (wxid, nickname, updated_at)
+                                VALUES (?, ?, ?)
+                            ''', (chatroom_id, f"群聊_{chatroom_id}", current_time))
+                        except Exception as db_e:
+                            logger.error(f"[DifyTask] Failed to insert default group name: {db_e}")
+                        continue
                 
-                # 新增：处理联系人信息
+                # 处理联系人信息
                 friends = response.get('data', {}).get('friends', [])
                 logger.info(f"[DifyTask] Total friends found: {len(friends)}")
                 if friends:
@@ -339,15 +362,22 @@ class DifyTask(Plugin):
                                 for contact in data['data']:
                                     wxid = contact.get('userName')
                                     nickname = contact.get('nickName', '')
+                                    if not nickname:
+                                        nickname = f"用户_{wxid}"
+                                        logger.warning(f"[DifyTask] Contact {wxid} has no nickname, using default name")
                                     if wxid:
                                         cursor.execute('''
                                             INSERT OR REPLACE INTO contacts (wxid, nickname, updated_at)
                                             VALUES (?, ?, ?)
                                         ''', (wxid, nickname, current_time))
+                            else:
+                                logger.error(f"[DifyTask] Failed to get contacts info: {data}")
+                        else:
+                            logger.error(f"[DifyTask] Failed to get contacts info, status: {friend_info_response.status_code}")
                     except Exception as e:
                         logger.error(f"[DifyTask] Failed to update contacts: {e}")
                 
-                # 清理过期数据（保持原有逻辑并添加联系人清理）
+                # 清理过期数据
                 week_ago = current_time - 7 * 24 * 3600
                 cursor.execute('DELETE FROM groups WHERE updated_at < ?', (week_ago,))
                 cursor.execute('DELETE FROM contacts WHERE updated_at < ?', (week_ago,))
