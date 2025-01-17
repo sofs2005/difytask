@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="1.3.5",
+    version="2.0.0",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -1025,21 +1025,31 @@ Cron表达式格式（高级）：
             
             for task_id, circle_str, time_str, cron_str in tasks:
                 try:
-                    # 检查是否是一次性任务（具体日期或今天明天后天）
-                    if len(circle_str) == 10 or circle_str in ["今天", "明天", "后天"]:
-                        # 从 cron 表达式获取日期
-                        cron_parts = cron_str.split()
-                        task_date = datetime.strptime(cron_parts[2], "%d")
-                        task_month = int(cron_parts[3])
-                        task_datetime = datetime(now.year, task_month, task_date.day)
+                    # 从 cron 表达式判断任务类型
+                    # cron[分 时 日 月 *] - 一次性任务的格式
+                    # cron[分 时 日 月 *] - 每年固定日期的格式（circle 中包含"每年"）
+                    # cron[分 时 * * *] - 每天的格式
+                    # cron[分 时 * * 1-5] - 工作日的格式
+                    # cron[分 时 * * 1,3,5] - 每周几的格式
+                    if cron_str.startswith("cron[") and cron_str.endswith("]"):
+                        cron_parts = cron_str[5:-1].split()
+                        if len(cron_parts) == 5:
+                            # 如果日期和月份都不是 *，需要进一步判断
+                            if cron_parts[2] != '*' and cron_parts[3] != '*':
+                                # 检查是否是每年固定日期
+                                if "每年" in circle_str:
+                                    continue  # 跳过每年固定日期的任务
+                                
+                                # 一次性任务的处理
+                                task_date = datetime.strptime(f"{now.year}-{cron_parts[3]}-{cron_parts[2]}", "%Y-%m-%d")
+                                
+                                logger.debug(f"[DifyTask] 检查任务: {task_id}, cron: {cron_str}, 日期: {task_date.date()}")
+                                
+                                if now.date() > task_date.date():
+                                    cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+                                    deleted_count += 1
+                                    logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str} (目标日期: {task_date.date()})")
                         
-                        logger.debug(f"[DifyTask] 检查任务: {task_id}, 类型: {circle_str}, cron: {cron_str}, 日期: {task_datetime.date()}, 当前日期: {now.date()}")
-                        
-                        if now.date() > task_datetime.date():
-                            cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-                            deleted_count += 1
-                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str} (目标日期: {task_datetime.date()})")
-                            
                 except Exception as e:
                     logger.error(f"[DifyTask] 检查任务过期失败: {task_id} {e}, cron: {cron_str}")
                     continue
@@ -1234,106 +1244,192 @@ Cron表达式格式（高级）：
             
             # 1. 先处理特殊命令（任务列表和取消任务）
             if command.startswith("任务列表"):
-                # 检查是否提供了密码
+                # 任务列表需要密码
                 parts = command.split()
                 if len(parts) < 2:
-                    e_context['reply'] = Reply(ReplyType.ERROR, "请提供访问密码")
+                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入密码")
                     e_context.action = EventAction.BREAK_PASS
                     return
                 
-                # 验证密码
                 password = parts[1]
-                config_password = self.plugin_config.get('task_list_password')
-                if not config_password:
-                    e_context['reply'] = Reply(ReplyType.ERROR, "管理员未设置访问密码，无法查看任务列表")
+                if password != self.plugin_config.get("task_list_password"):
+                    e_context['reply'] = Reply(ReplyType.TEXT, "密码错误")
                     e_context.action = EventAction.BREAK_PASS
                     return
                 
-                if password != config_password:
-                    e_context['reply'] = Reply(ReplyType.ERROR, "访问密码错误")
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-                
-                # 密码正确，显示任务列表
-                task_list = self._get_task_list()
-                e_context['reply'] = Reply(ReplyType.TEXT, task_list)
+                result = self._get_task_list()
+                e_context['reply'] = Reply(ReplyType.TEXT, result)
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 取消任务（修改这里）
-            if command.startswith("取消 "):
-                task_id = command.replace("取消 ", "", 1).strip()
+            elif command.startswith("取消"):
+                # 取消任务不需要密码
+                task_id = command.replace("取消", "", 1).strip()
+                if not task_id:
+                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入要取消的任务ID")
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                
                 result = self._delete_task(task_id)
                 e_context['reply'] = Reply(ReplyType.TEXT, result)
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 2. 处理 cron 表达式命令
-            if "cron[" in command:
-                # 验证命令格式（不需要再导入 re）
-                match = re.match(r'cron\[(.*?)\](?:\s+g\[(.*?)\])?\s+(.*)', command)
-                if not match:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "命令格式错误，正确格式：\n$time cron[分 时 日 月 周] 事件内容\n或\n$time cron[分 时 日 月 周] g[群组] 事件内容")
+            # 解析命令：时间描述和事件内容
+            if command.startswith("cron["):
+                # 对于 cron 表达式，找到完整的 cron 部分
+                cron_end = command.find("]")
+                if cron_end == -1:
+                    e_context['reply'] = Reply(ReplyType.TEXT, "cron表达式格式错误，缺少结束符号 ]")
                     e_context.action = EventAction.BREAK_PASS
                     return
-                    
-                cron_exp = match.group(1).strip()
-                group_name = match.group(2)  # 可能是 None
-                event_content = match.group(3).strip()
-                
-                # 验证事件内容不为空
-                if not event_content:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
+                time_desc = command[:cron_end + 1]
+                event_content = command[cron_end + 1:].strip()
+            else:
+                # 普通命令的解析
+                first_space = command.find(' ')
+                if first_space == -1:
+                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入时间描述和事件内容，格式：$time 时间描述 事件内容")
                     e_context.action = EventAction.BREAK_PASS
                     return
-                    
-                # 验证 cron 表达式格式
-                if not self._validate_cron_format(cron_exp):
-                    e_context['reply'] = Reply(ReplyType.TEXT, "cron表达式格式错误，正确格式为：分 时 日 月 周\n例如：*/15 9-18 * * 1-5")
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-                    
-                # 构建完整的事件字符串
-                event_str = f"g[{group_name}] {event_content}" if group_name else event_content
-                
-                # 创建任务
-                result = self._create_task("00:00", f"cron[{cron_exp}]", event_str, e_context['context'])
-                e_context['reply'] = Reply(ReplyType.TEXT, result)
-                e_context.action = EventAction.BREAK_PASS
-                return
-                
-            # 3. 处理普通定时任务
-            match = re.match(r'([^\s]+)\s+([^\s]+)(?:\s+g\[(.*?)\])?\s+(.*)', command)
-            if not match:
-                e_context['reply'] = Reply(ReplyType.TEXT, "命令格式错误，正确格式：\n周期 时间 事件内容\n或\n周期 时间 g[群组] 事件内容")
-                e_context.action = EventAction.BREAK_PASS
-                return
-                
-            circle_str = match.group(1).strip()
-            time_str = match.group(2).strip()
-            group_name = match.group(3)  # 可能是 None
-            event_content = match.group(4).strip()
-            
-            # 验证事件内容不为空
+                time_desc = command[:first_space].strip()
+                event_content = command[first_space:].strip()
+
             if not event_content:
                 e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
                 e_context.action = EventAction.BREAK_PASS
                 return
-                
-            # 验证基本格式
-            is_valid, error_msg = self._validate_normal_format(circle_str, time_str)
-            if not is_valid:
-                e_context['reply'] = Reply(ReplyType.TEXT, error_msg)
+
+            # 使用 LLM 解析时间描述
+            success, result = self._parse_time_with_llm(time_desc)
+            if not success:
+                e_context['reply'] = Reply(ReplyType.TEXT, result)
                 e_context.action = EventAction.BREAK_PASS
                 return
-                
-            # 构建完整的事件字符串
-            event_str = f"g[{group_name}] {event_content}" if group_name else event_content
-            
+
             # 创建任务
-            result = self._create_task(time_str, circle_str, event_str, e_context['context'])
+            result = self._create_task(result["time"], result["circle"], event_content, e_context['context'])
+
             e_context['reply'] = Reply(ReplyType.TEXT, result)
             e_context.action = EventAction.BREAK_PASS
+
+    def _parse_time_with_llm(self, description):
+        """使用 LLM 解析时间描述"""
+        try:
+            # 获取 OpenAI 配置
+            api_base = self.plugin_config.get("openai_api_base", "https://api.openai.com/v1")
+            api_key = self.plugin_config.get("openai_api_key")
+            model = self.plugin_config.get("openai_model", "gpt-3.5-turbo")
+
+            if not api_key:
+                return False, "OpenAI API 密钥未配置，请在配置文件中设置 openai_api_key"
+
+            # 获取当前时间
+            now = datetime.now()
+            current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 构建 prompt
+            prompt = f"""当前时间是: {current_time}
+
+请解析以下时间描述，并转换为标准格式：{description}
+
+请以 JSON 格式返回，必须包含以下字段:
+- time: 具体时间 (HH:mm格式，如 09:30)
+- circle: 周期类型，用于展示。如果是 cron 表达式，则保持原始 cron 表达式
+- cron: cron表达式，格式：cron[分 时 日 月 周]
+
+特别说明：对于特殊周期（如每x小时），请按以下格式返回：
+- time: cron
+- circle: cron[分 时 日 月 周] 格式
+- cron: cron[分 时 日 月 周]
+
+示例输入: "每2小时"
+示例输出: {{"time": "cron", "circle": "cron[mm */2 * * *]", "cron": "cron[mm */2 * * *]"}}
+
+示例输入: "cron[20,40 * * * *]"
+示例输出: {{"time": "cron", "circle": "cron[20,40 * * * *]", "cron": "cron[20,40 * * * *]"}}
+
+
+示例输入: "每天早上9点"
+示例输出: {{"time": "09:00", "circle": "每天", "cron": "cron[0 9 * * *]"}}
+
+示例输入: "明天中午12点"
+示例输出: {{"time": "12:00", "circle": "明天", "cron": "cron[0 12 14 1 *]"}}
+
+示例输入: "每周一三五下午2点"
+示例输出: {{"time": "14:00", "circle": "每周一三五", "cron": "cron[0 14 * * 1,3,5]"}}
+
+示例输入: "工作日下午6点"
+示例输出: {{"time": "18:00", "circle": "工作日", "cron": "cron[0 18 * * 1-5]"}}
+
+示例输入: "2024-01-01 12:00"
+示例输出: {{"time": "12:00", "circle": "2024-01-01", "cron": "cron[0 12 1 1 *]"}}
+
+示例输入: "每年1月1日上午9点"
+示例输出: {{"time": "09:00", "circle": "每年1月1日", "cron": "cron[0 9 1 1 *]"}}
+
+示例输入: "5分钟后"
+示例输出: {{"time": "14:25", "circle": "今天", "cron": "cron[25 14 13 1 *]"}}
+
+示例输入: "2小时30分钟后"
+示例输出: {{"time": "16:50", "circle": "今天", "cron": "cron[50 16 13 1 *]"}}
+
+对于相对时间（如"几分钟后"、"几小时后"等），请计算出具体时间点并生成对应的 cron 表达式。
+所有时间都必须转换为 cron 表达式格式。"""
+
+            # 添加日志输出
+            logger.info(f"[DifyTask] 发送给 LLM 的提示词: {prompt}")
+
+            # 准备请求参数
+            url = f"{api_base}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "你是一个时间解析助手，专门负责将自然语言的时间描述转换为标准格式。"},
+                    {"role": "user", "content": prompt}
+                ]
+            }
+
+            # 发送请求
+            response = requests.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                logger.error(f"[DifyTask] OpenAI API 错误: {response.text}")
+                return False, f"解析失败：API 错误 {response.status_code}"
+
+            # 解析返回的 JSON
+            try:
+                content = response.json()["choices"][0]["message"]["content"]
+                
+                # 处理可能包含的 Markdown 代码块
+                if "```json" in content:
+                    # 提取代码块中的 JSON 内容
+                    json_content = content.split("```json\n")[1].split("\n```")[0]
+                    result = json.loads(json_content)
+                else:
+                    result = json.loads(content)
+                    
+                logger.debug(f"[DifyTask] LLM解析结果: {result}")
+                
+                # 验证返回格式
+                if not all(k in result for k in ["time", "circle", "cron"]):
+                    return False, "解析结果缺少必要字段"
+                
+                # 验证 cron 格式
+                if not result["cron"].startswith("cron[") or not result["cron"].endswith("]"):
+                    return False, "cron表达式格式错误"
+                    
+                return True, result
+            except json.JSONDecodeError:
+                logger.error(f"[DifyTask] LLM返回格式错误: {response.text}")
+                return False, "解析结果格式错误"
+
+        except Exception as e:
+            logger.error(f"[DifyTask] LLM解析失败: {e}")
+            return False, f"解析失败: {str(e)}"
 
     def _adjust_time_for_conflicts(self, time_str: str, circle_str: str, cursor) -> str:
         """调整时间避免冲突，返回调整后的时间"""
