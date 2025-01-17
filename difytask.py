@@ -1028,17 +1028,20 @@ Cron表达式格式（高级）：
                     # 检查是否是一次性任务（具体日期或今天明天后天）
                     if len(circle_str) == 10 or circle_str in ["今天", "明天", "后天"]:
                         # 从 cron 表达式获取日期
-                        task_date = datetime.strptime(cron_str.split()[3], "%Y-%m-%d")
-                        logger.debug(f"[DifyTask] 检查任务: {task_id}, 类型: {circle_str}, 日期: {task_date.date()}, 当前日期: {now.date()}")
+                        cron_parts = cron_str.split()
+                        task_date = datetime.strptime(cron_parts[2], "%d")
+                        task_month = int(cron_parts[3])
+                        task_datetime = datetime(now.year, task_month, task_date.day)
                         
-                        # 如果任务日期已过期就删除
-                        if now.date() > task_date.date():
+                        logger.debug(f"[DifyTask] 检查任务: {task_id}, 类型: {circle_str}, cron: {cron_str}, 日期: {task_datetime.date()}, 当前日期: {now.date()}")
+                        
+                        if now.date() > task_datetime.date():
                             cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
                             deleted_count += 1
-                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str} (目标日期: {task_date.date()})")
+                            logger.info(f"[DifyTask] 删除过期任务: {task_id} {circle_str} {time_str} (目标日期: {task_datetime.date()})")
                             
                 except Exception as e:
-                    logger.error(f"[DifyTask] 检查任务过期失败: {task_id} {e}")
+                    logger.error(f"[DifyTask] 检查任务过期失败: {task_id} {e}, cron: {cron_str}")
                     continue
             
             conn.commit()
