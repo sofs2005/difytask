@@ -427,21 +427,23 @@ Cron表达式格式（高级）：
     def _get_user_nickname(self, user_id):
         """获取用户昵称"""
         try:
-            response = requests.post(
-                f"{conf().get('gewechat_base_url')}/contacts/getBriefInfo",
-                json={
-                    "appId": conf().get('gewechat_app_id'),
-                    "wxids": [user_id]
-                },
-                headers={
-                    "X-GEWE-TOKEN": conf().get('gewechat_token')
-                }
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('ret') == 200 and data.get('data'):
-                    return data['data'][0].get('nickName', user_id)
-            return user_id
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 先检查是否是群ID
+            cursor.execute('SELECT nickname FROM groups WHERE wxid = ?', (user_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                nickname = result[0]
+            else:
+                # 如果不是群，则查询用户昵称
+                cursor.execute('SELECT nickname FROM contacts WHERE wxid = ?', (user_id,))
+                result = cursor.fetchone()
+                nickname = result[0] if result else f"用户_{user_id}"
+            
+            conn.close()
+            return nickname
         except Exception as e:
             logger.error(f"[DifyTask] 获取用户昵称失败: {e}")
             return user_id
@@ -930,14 +932,33 @@ Cron表达式格式（高级）：
                     logger.info(f"[DifyTask] cmsg 类型: {type(cmsg)}")
                     logger.info(f"[DifyTask] cmsg 值: {cmsg}")
                     
-                    # 直接构建 msg_info，与单聊指定群保持一致
-                    msg_info = {
-                        "from_user_id": cmsg.from_user_id,
-                        "actual_user_id": cmsg.actual_user_id,
-                        "to_user_id": cmsg.to_user_id,
-                        "create_time": cmsg.create_time,
-                        "is_group": True
-                    }
+                    # 获取群名称
+                    try:
+                        cursor.execute('SELECT nickname FROM groups WHERE wxid = ?', (cmsg.from_user_id,))
+                        group_result = cursor.fetchone()
+                        group_nickname = group_result[0] if group_result else f"群聊_{cmsg.from_user_id}"
+                        
+                        # 直接构建 msg_info，与单聊指定群保持一致
+                        msg_info = {
+                            "from_user_id": cmsg.from_user_id,
+                            "actual_user_id": cmsg.actual_user_id,
+                            "to_user_id": cmsg.to_user_id,
+                            "create_time": cmsg.create_time,
+                            "is_group": True,
+                            "other_user_nickname": group_nickname,  # 添加群名称
+                            "actual_user_nickname": group_nickname  # 添加群名称
+                        }
+                    except Exception as e:
+                        logger.error(f"[DifyTask] 获取群名称失败: {e}")
+                        msg_info = {
+                            "from_user_id": cmsg.from_user_id,
+                            "actual_user_id": cmsg.actual_user_id,
+                            "to_user_id": cmsg.to_user_id,
+                            "create_time": cmsg.create_time,
+                            "is_group": True,
+                            "other_user_nickname": f"群聊_{cmsg.from_user_id}",  # 使用默认群名称
+                            "actual_user_nickname": f"群聊_{cmsg.from_user_id}"  # 使用默认群名称
+                        }
                     logger.info(f"[DifyTask] 群聊消息信息构建完成: {msg_info}")
                 
                 logger.info(f"[DifyTask] 最终的 msg_info: {msg_info}")
@@ -1106,53 +1127,35 @@ Cron表达式格式（高级）：
                     # 设置其他用户ID和昵称
                     chat_msg.other_user_id = chat_msg.from_user_id
                     
-                    # 为群消息设置额外属性
-                    if is_group:
-                        try:
-                            # 直接从 ChatMessage 获取群名称
-                            chat_msg.other_user_nickname = msg_info.get('from_user_id')
-                            chat_msg.actual_user_nickname = msg_info.get('from_user_id')
+                    # 获取昵称（统一使用数据库）
+                    try:
+                        conn = sqlite3.connect(self.db_path)
+                        cursor = conn.cursor()
+                        
+                        if is_group:
+                            cursor.execute('SELECT nickname FROM groups WHERE wxid = ?', (chat_msg.from_user_id,))
+                        else:
+                            cursor.execute('SELECT nickname FROM contacts WHERE wxid = ?', (chat_msg.from_user_id,))
+                        
+                        result = cursor.fetchone()
+                        conn.close()
+                        
+                        if result:
+                            chat_msg.other_user_nickname = result[0]
+                            chat_msg.actual_user_nickname = result[0]
+                        else:
+                            default_name = f"群聊_{chat_msg.from_user_id}" if is_group else f"用户_{chat_msg.from_user_id}"
+                            chat_msg.other_user_nickname = default_name
+                            chat_msg.actual_user_nickname = default_name
                             
-                            # 如果消息中包含群名称信息，则使用该信息
-                            if isinstance(msg_info, dict) and 'other_user_nickname' in msg_info:
-                                chat_msg.other_user_nickname = msg_info['other_user_nickname']
-                                chat_msg.actual_user_nickname = msg_info['other_user_nickname']
-                            
-                            logger.debug(f"[DifyTask] 使用现有群信息: {chat_msg.other_user_nickname}")
-                            
-                        except Exception as e:
-                            logger.error(f"[DifyTask] 获取群名称失败: {str(e)}")
-                            chat_msg.other_user_nickname = chat_msg.from_user_id
-                            chat_msg.actual_user_nickname = chat_msg.from_user_id
-                    else:
-                        # 获取用户昵称
-                        try:
-                            response = requests.post(
-                                f"{conf().get('gewechat_base_url')}/contacts/getBriefInfo",
-                                json={
-                                    "appId": conf().get('gewechat_app_id'),
-                                    "wxids": [chat_msg.from_user_id]
-                                },
-                                headers={
-                                    "X-GEWE-TOKEN": conf().get('gewechat_token')
-                                }
-                            )
-                            if response.status_code == 200:
-                                data = response.json()
-                                if data.get('ret') == 200 and data.get('data'):
-                                    chat_msg.other_user_nickname = data['data'][0].get('nickName', chat_msg.from_user_id)
-                                    chat_msg.actual_user_nickname = data['data'][0].get('nickName', chat_msg.from_user_id)
-                                else:
-                                    chat_msg.other_user_nickname = chat_msg.from_user_id
-                                    chat_msg.actual_user_nickname = chat_msg.from_user_id
-                            else:
-                                chat_msg.other_user_nickname = chat_msg.from_user_id
-                                chat_msg.actual_user_nickname = chat_msg.from_user_id
-                        except Exception as e:
-                            logger.error(f"[DifyTask] 获取用户昵称失败: {e}")
-                            chat_msg.other_user_nickname = chat_msg.from_user_id
-                            chat_msg.actual_user_nickname = chat_msg.from_user_id
-                    
+                        logger.debug(f"[DifyTask] 使用昵称: {chat_msg.other_user_nickname}")
+                        
+                    except Exception as e:
+                        logger.error(f"[DifyTask] 获取昵称失败: {str(e)}")
+                        default_name = f"群聊_{chat_msg.from_user_id}" if is_group else f"用户_{chat_msg.from_user_id}"
+                        chat_msg.other_user_nickname = default_name
+                        chat_msg.actual_user_nickname = default_name
+
                     # 构建 Context
                     context = Context(ContextType.TEXT, content)
                     context["session_id"] = msg_info.get('from_user_id')
