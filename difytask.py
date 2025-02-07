@@ -733,6 +733,9 @@ Cron表达式格式（高级）：
                     except ValueError:
                         return "日期格式错误"
             
+            # 获取是否群聊
+            is_group = context.get('isgroup', False)
+            
             # 连接数据库
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -802,12 +805,6 @@ Cron表达式格式（高级）：
                 msg_info = {}
                 
                 # 检查是否在私聊中指定了用户或群组
-                is_group = context.get("isgroup", False)
-                logger.info(f"[DifyTask] 是否群聊: {is_group}")
-                logger.info(f"[DifyTask] 进入条件判断，is_group={is_group}")
-                group_name = None
-                target_user = None
-
                 if not is_group:
                     logger.info("[DifyTask] 进入私聊处理分支")
                     # 检查是否指定了用户
@@ -827,33 +824,49 @@ Cron表达式格式（高级）：
                             if input_password != password:
                                 return "密码错误"
                             
-                            # 查询用户信息
-                            cursor.execute('SELECT wxid FROM contacts WHERE nickname = ?', (user_name,))
-                            result = cursor.fetchone()
+                            # 模糊查询用户信息
+                            cursor.execute('''
+                                SELECT wxid, nickname 
+                                FROM contacts 
+                                WHERE nickname LIKE ? 
+                                ORDER BY 
+                                    CASE 
+                                        WHEN nickname = ? THEN 0
+                                        WHEN nickname LIKE ? THEN 1
+                                        WHEN nickname LIKE ? THEN 2
+                                        ELSE 3
+                                    END
+                                LIMIT 5
+                            ''', (f'%{user_name}%', user_name, f'{user_name}%', f'%{user_name}'))
                             
-                            if result:
-                                target_user = result[0]
-                                # 更新消息信息
-                                if cmsg:
-                                    msg_info = {
-                                        "from_user_id": target_user,
-                                        "actual_user_id": cmsg.from_user_id,
-                                        "to_user_id": cmsg.to_user_id,
-                                        "create_time": cmsg.create_time,
-                                        "is_group": False
-                                    }
-                                else:
-                                    # 如果 cmsg 为空，使用 context 构建
-                                    msg_info = {
-                                        "from_user_id": target_user,
-                                        "actual_user_id": context.get("session_id", ""),
-                                        "to_user_id": context.get("receiver", ""),
-                                        "create_time": int(time.time()),
-                                        "is_group": False
-                                    }
-                                logger.debug(f"[DifyTask] 找到用户: {user_name}, wxid: {target_user}")
+                            results = cursor.fetchall()
+                            
+                            if not results:
+                                return f"未找到匹配的用户: {user_name}"
+                            elif len(results) > 1:
+                                # 返回匹配到的用户列表
+                                matches = "\n".join([f"- {nickname}" for _, nickname in results])
+                                return f"找到多个匹配的用户:\n{matches}\n请使用更精确的用户名"
+                            
+                            target_user = results[0][0]  # 使用第一个匹配结果的wxid
+                            # 更新消息信息
+                            if cmsg:
+                                msg_info = {
+                                    "from_user_id": target_user,
+                                    "actual_user_id": cmsg.from_user_id,
+                                    "to_user_id": cmsg.to_user_id,
+                                    "create_time": cmsg.create_time,
+                                    "is_group": False
+                                }
                             else:
-                                return f"未找到用户: {user_name}"
+                                msg_info = {
+                                    "from_user_id": target_user,
+                                    "actual_user_id": context.get("session_id", ""),
+                                    "to_user_id": context.get("receiver", ""),
+                                    "create_time": int(time.time()),
+                                    "is_group": False
+                                }
+                            logger.debug(f"[DifyTask] 找到用户: {results[0][1]}, wxid: {target_user}")
                         else:
                             return "格式错误，正确格式：$time 周期 时间 u[用户名] 密码 任务内容"
                     
@@ -874,36 +887,54 @@ Cron表达式格式（高级）：
                             if input_password != password:
                                 return "密码错误"
                             
-                            # 查询群组信息
-                            cursor.execute('SELECT wxid FROM groups WHERE nickname = ?', (group_name,))
-                            result = cursor.fetchone()
+                            # 模糊查询群组信息
+                            cursor.execute('''
+                                SELECT wxid, nickname 
+                                FROM groups 
+                                WHERE nickname LIKE ? 
+                                ORDER BY 
+                                    CASE 
+                                        WHEN nickname = ? THEN 0
+                                        WHEN nickname LIKE ? THEN 1
+                                        WHEN nickname LIKE ? THEN 2
+                                        ELSE 3
+                                    END
+                                LIMIT 5
+                            ''', (f'%{group_name}%', group_name, f'{group_name}%', f'%{group_name}'))
                             
-                            if result:
-                                group_wxid = result[0]
-                                is_group = True
-                                # 更新消息信息，将群ID设置为from_user_id
-                                if cmsg:
-                                    # 创建新的 ChatMessage 对象
-                                    new_msg = ChatMessage({})
-                                    new_msg.from_user_id = group_wxid      # 群ID
-                                    new_msg.actual_user_id = cmsg.from_user_id   # 发送者ID
-                                    new_msg.to_user_id = cmsg.to_user_id          # 机器人ID
-                                    new_msg.create_time = cmsg.create_time
-                                    new_msg.is_group = True
-                                    new_msg._prepared = True
-                                    # 更新 context
-                                    context["msg"] = new_msg
-                                    
-                                    msg_info = {
-                                        "from_user_id": new_msg.from_user_id,
-                                        "actual_user_id": new_msg.actual_user_id,
-                                        "to_user_id": new_msg.to_user_id,
-                                        "create_time": new_msg.create_time,
-                                        "is_group": True
-                                    }
-                                    logger.debug(f"[DifyTask] 群聊消息信息: {msg_info}")
+                            results = cursor.fetchall()
+                            
+                            if not results:
+                                return f"未找到匹配的群组: {group_name}"
+                            elif len(results) > 1:
+                                # 返回匹配到的群组列表
+                                matches = "\n".join([f"- {nickname}" for _, nickname in results])
+                                return f"找到多个匹配的群组:\n{matches}\n请使用更精确的群名"
+                            
+                            group_wxid = results[0][0]  # 使用第一个匹配结果的wxid
+                            is_group = True
+                            # 更新消息信息，将群ID设置为from_user_id
+                            if cmsg:
+                                new_msg = ChatMessage({})
+                                new_msg.from_user_id = group_wxid      # 群ID
+                                new_msg.actual_user_id = cmsg.from_user_id   # 发送者ID
+                                new_msg.to_user_id = cmsg.to_user_id          # 机器人ID
+                                new_msg.create_time = cmsg.create_time
+                                new_msg.is_group = True
+                                new_msg._prepared = True
+                                # 更新 context
+                                context["msg"] = new_msg
+                                
+                                msg_info = {
+                                    "from_user_id": new_msg.from_user_id,
+                                    "actual_user_id": new_msg.actual_user_id,
+                                    "to_user_id": new_msg.to_user_id,
+                                    "create_time": new_msg.create_time,
+                                    "is_group": True
+                                }
+                                logger.debug(f"[DifyTask] 群聊消息信息: {msg_info}")
                             else:
-                                return f"未找到群组: {group_name}"
+                                return "格式错误，正确格式：$time 周期 时间 g[群名] 密码 任务内容"
                         else:
                             return "格式错误，正确格式：$time 周期 时间 g[群名] 密码 任务内容"
                     else:
@@ -1384,6 +1415,7 @@ Cron表达式格式（高级）：
     任务内容的注意事项：
         如果任务内容中含有"提醒"字样，则在任务内容中"提醒"这两个字不可省略！
         任务内容必须保持原样，特别针对"$", " "等特殊符号，不得省略及改变文字顺序。
+        不用去分析用户输入的文字内容含义，只需要按照用户输入的文字进行拆解转换。
     
 
 用户输入: <{user_input}>
