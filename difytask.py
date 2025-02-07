@@ -153,7 +153,7 @@ class DifyTask(Plugin):
                 last_check_time = current_time
 
                 # 每天凌晨3点清理过期任务
-                if now.hour == 3 and now.minute == 0:
+                if now.hour == 3 and now.minute == 0 and now.second == 0:
                     self._clean_expired_tasks()
                 
                 # 每6小时更新一次群信息
@@ -754,58 +754,8 @@ Cron表达式格式（高级）：
                     logger.info(f"[DifyTask] 任务时间已自动调整为: {time_str} 以避免冲突")
                 # 保存到数据库前的最后验证
                 if not self._is_valid_task_data(time_str, circle_str, event_str):
-                    return "任务数据验证失败，请检查输入"
-                    
-                # 获取消息相关信息
-                cmsg: ChatMessage = context.get("msg", None)
+                    return "任务数据验证失败，请检查输入"   
                 
-                # 检查是否在私聊中指定了用户或群组
-                is_group = context.get("isgroup", False)
-                group_name = None
-                target_user = None
-
-                if not is_group:
-                    # 检查是否指定了用户
-                    if event_str.startswith("u["):
-                        # 从事件内容中提取用户名和密码，格式：u[用户名] 密码 其他内容
-                        match = re.match(r'u\[([^\]]+)\]\s+(\S+)\s+(.*)', event_str)
-                        if match:
-                            user_name = match.group(1)
-                            input_password = match.group(2)
-                            event_str = match.group(3).strip()
-                            logger.debug(f"[DifyTask] 从私聊中提取用户名: {user_name}, 实际内容: {event_str}")
-                            
-                            # 验证密码
-                            password = self.plugin_config.get("task_list_password")
-                            if not password:
-                                return "未配置任务密码，无法创建指定用户的任务"
-                            if input_password != password:
-                                return "密码错误"
-                            
-                            # 查询用户信息
-                            cursor.execute('SELECT wxid FROM contacts WHERE nickname = ?', (user_name,))
-                            result = cursor.fetchone()
-                            
-                            if result:
-                                target_user = result[0]
-                                # 更新消息信息
-                                if cmsg:
-                                    # 创建新的 ChatMessage 对象，而不是使用字典
-                                    new_msg = ChatMessage({})
-                                    new_msg.from_user_id = target_user
-                                    new_msg.actual_user_id = cmsg.from_user_id
-                                    new_msg.to_user_id = cmsg.to_user_id
-                                    new_msg.create_time = cmsg.create_time
-                                    new_msg.is_group = False
-                                    new_msg._prepared = True
-                                    # 使用 ChatMessage 对象更新 context
-                                    context["msg"] = new_msg
-                                    logger.debug(f"[DifyTask] 找到用户: {user_name}, wxid: {target_user}")
-                            else:
-                                return f"未找到用户: {user_name}"
-                        else:
-                            return "格式错误，正确格式：$time 周期 时间 u[用户名] 密码 任务内容"
-
                 # 如果是cron表达式，直接验证cron格式
                 if circle_str.startswith("cron[") and circle_str.endswith("]"):
                     cron_exp = circle_str[5:-1].strip()  # 移除前后空格
@@ -846,15 +796,18 @@ Cron表达式格式（高级）：
                 
                 # 获取消息相关信息
                 cmsg: ChatMessage = context.get("msg", None)
-                logger.debug(f"[DifyTask] 原始消息对象: {cmsg}")
+                logger.info(f"[DifyTask] 原始消息对象: {cmsg}")
                 msg_info = {}
                 
                 # 检查是否在私聊中指定了用户或群组
                 is_group = context.get("isgroup", False)
+                logger.info(f"[DifyTask] 是否群聊: {is_group}")
+                logger.info(f"[DifyTask] 进入条件判断，is_group={is_group}")
                 group_name = None
                 target_user = None
 
                 if not is_group:
+                    logger.info("[DifyTask] 进入私聊处理分支")
                     # 检查是否指定了用户
                     if event_str.startswith("u["):
                         # 从事件内容中提取用户名和密码，格式：u[用户名] 密码 其他内容
@@ -880,23 +833,29 @@ Cron表达式格式（高级）：
                                 target_user = result[0]
                                 # 更新消息信息
                                 if cmsg:
-                                    # 创建新的 ChatMessage 对象，而不是使用字典
-                                    new_msg = ChatMessage({})
-                                    new_msg.from_user_id = target_user
-                                    new_msg.actual_user_id = cmsg.from_user_id
-                                    new_msg.to_user_id = cmsg.to_user_id
-                                    new_msg.create_time = cmsg.create_time
-                                    new_msg.is_group = False
-                                    new_msg._prepared = True
-                                    # 使用 ChatMessage 对象更新 context
-                                    context["msg"] = new_msg
-                                    logger.debug(f"[DifyTask] 找到用户: {user_name}, wxid: {target_user}")
+                                    msg_info = {
+                                        "from_user_id": target_user,
+                                        "actual_user_id": cmsg.from_user_id,
+                                        "to_user_id": cmsg.to_user_id,
+                                        "create_time": cmsg.create_time,
+                                        "is_group": False
+                                    }
+                                else:
+                                    # 如果 cmsg 为空，使用 context 构建
+                                    msg_info = {
+                                        "from_user_id": target_user,
+                                        "actual_user_id": context.get("session_id", ""),
+                                        "to_user_id": context.get("receiver", ""),
+                                        "create_time": int(time.time()),
+                                        "is_group": False
+                                    }
+                                logger.debug(f"[DifyTask] 找到用户: {user_name}, wxid: {target_user}")
                             else:
                                 return f"未找到用户: {user_name}"
                         else:
                             return "格式错误，正确格式：$time 周期 时间 u[用户名] 密码 任务内容"
                     
-                    # 现有的群组处理代码
+                    # 检查是否指定了群组
                     elif event_str.startswith("g["):
                         # 从事件内容中提取群名和密码，格式：g[群名] 密码 其他内容
                         match = re.match(r'g\[([^\]]+)\]\s+(\S+)\s+(.*)', event_str)
@@ -922,39 +881,78 @@ Cron表达式格式（高级）：
                                 is_group = True
                                 # 更新消息信息，将群ID设置为from_user_id
                                 if cmsg:
+                                    # 创建新的 ChatMessage 对象
+                                    new_msg = ChatMessage({})
+                                    new_msg.from_user_id = group_wxid      # 群ID
+                                    new_msg.actual_user_id = cmsg.from_user_id   # 发送者ID
+                                    new_msg.to_user_id = cmsg.to_user_id          # 机器人ID
+                                    new_msg.create_time = cmsg.create_time
+                                    new_msg.is_group = True
+                                    new_msg._prepared = True
+                                    # 更新 context
+                                    context["msg"] = new_msg
+                                    
                                     msg_info = {
-                                        "from_user_id": group_wxid,  # 使用群ID
-                                        "actual_user_id": cmsg.from_user_id,  # 保留原始发送者ID
-                                        "to_user_id": cmsg.to_user_id,
-                                        "create_time": cmsg.create_time,
+                                        "from_user_id": new_msg.from_user_id,
+                                        "actual_user_id": new_msg.actual_user_id,
+                                        "to_user_id": new_msg.to_user_id,
+                                        "create_time": new_msg.create_time,
                                         "is_group": True
                                     }
-                                logger.debug(f"[DifyTask] 找到群组: {group_name}, wxid: {group_wxid}")
+                                    logger.debug(f"[DifyTask] 群聊消息信息: {msg_info}")
                             else:
                                 return f"未找到群组: {group_name}"
                         else:
                             return "格式错误，正确格式：$time 周期 时间 g[群名] 密码 任务内容"
                     else:
-                        # 常规消息处理
+                        # 处理普通私聊消息
                         if cmsg:
                             msg_info = {
                                 "from_user_id": cmsg.from_user_id,
-                                "actual_user_id": getattr(cmsg, "actual_user_id", cmsg.from_user_id),
+                                "actual_user_id": cmsg.from_user_id,
                                 "to_user_id": cmsg.to_user_id,
                                 "create_time": cmsg.create_time,
-                                "is_group": is_group
+                                "is_group": False
                             }
+                        else:
+                            # 如果 cmsg 为空，使用 context 中的其他信息构建
+                            msg_info = {
+                                "from_user_id": context.get("session_id", ""),
+                                "actual_user_id": context.get("session_id", ""),
+                                "to_user_id": context.get("receiver", ""),
+                                "create_time": int(time.time()),
+                                "is_group": False
+                            }
+                        logger.info(f"[DifyTask] 私聊消息信息构建完成: {msg_info}")
+                else:
+                    # 群聊消息处理
+                    logger.info("[DifyTask] 进入群聊处理分支")
+                    logger.info(f"[DifyTask] cmsg 类型: {type(cmsg)}")
+                    logger.info(f"[DifyTask] cmsg 值: {cmsg}")
+                    
+                    # 直接构建 msg_info，与单聊指定群保持一致
+                    msg_info = {
+                        "from_user_id": cmsg.from_user_id,
+                        "actual_user_id": cmsg.actual_user_id,
+                        "to_user_id": cmsg.to_user_id,
+                        "create_time": cmsg.create_time,
+                        "is_group": True
+                    }
+                    logger.info(f"[DifyTask] 群聊消息信息构建完成: {msg_info}")
                 
-                logger.debug(f"[DifyTask] 处理后的消息信息: {msg_info}")
+                logger.info(f"[DifyTask] 最终的 msg_info: {msg_info}")
                 
                 # 构建上下文信息
                 context_info = {
                     "type": context.type.name,
-                    "content": event_str,
+                    "content": event_str.strip(),
                     "isgroup": is_group,
-                    "msg": msg_info if 'msg_info' in locals() else context.get("msg", {})
+                    "msg": msg_info
                 }
-                logger.debug(f"[DifyTask] 上下文信息: {context_info}")
+                logger.info(f"[DifyTask] 完整的上下文信息: {context_info}")
+                
+                # 在保存到数据库之前再次检查
+                logger.info(f"[DifyTask] 即将保存到数据库的上下文信息: {json.dumps(context_info)}")
                 
                 # 保存到数据库
                 cursor.execute('''
@@ -1111,21 +1109,19 @@ Cron表达式格式（高级）：
                     # 为群消息设置额外属性
                     if is_group:
                         try:
-                            # 使用群聊专用接口获取群信息
-                            group_info = self.client.get_chatroom_info(
-                                self.app_id,
-                                chat_msg.from_user_id
-                            )
-                            if group_info.get('ret') == 200:
-                                data = group_info.get('data', {})
-                                chat_msg.other_user_nickname = data.get('nickName', chat_msg.from_user_id)
-                                chat_msg.actual_user_nickname = data.get('nickName', chat_msg.from_user_id)
-                            else:
-                                logger.error(f"[DifyTask] 获取群信息失败: {group_info}")
-                                chat_msg.other_user_nickname = chat_msg.from_user_id
-                                chat_msg.actual_user_nickname = chat_msg.from_user_id
+                            # 直接从 ChatMessage 获取群名称
+                            chat_msg.other_user_nickname = msg_info.get('from_user_id')
+                            chat_msg.actual_user_nickname = msg_info.get('from_user_id')
+                            
+                            # 如果消息中包含群名称信息，则使用该信息
+                            if isinstance(msg_info, dict) and 'other_user_nickname' in msg_info:
+                                chat_msg.other_user_nickname = msg_info['other_user_nickname']
+                                chat_msg.actual_user_nickname = msg_info['other_user_nickname']
+                            
+                            logger.debug(f"[DifyTask] 使用现有群信息: {chat_msg.other_user_nickname}")
+                            
                         except Exception as e:
-                            logger.error(f"[DifyTask] 获取群名称失败: {e}")
+                            logger.error(f"[DifyTask] 获取群名称失败: {str(e)}")
                             chat_msg.other_user_nickname = chat_msg.from_user_id
                             chat_msg.actual_user_nickname = chat_msg.from_user_id
                     else:
@@ -1233,88 +1229,101 @@ Cron表达式格式（高级）：
         # 处理命令
         if content.startswith(self.command_prefix):
             logger.debug(f"[DifyTask] 收到命令: {content}")
-            # 移除指令前缀
-            command = content.replace(self.command_prefix, "", 1).strip()
-            
-            # 空命令显示帮助
-            if not command:
-                e_context['reply'] = Reply(ReplyType.TEXT, self.get_help_text())
-                e_context.action = EventAction.BREAK_PASS
-                return
-            
-            # 1. 先处理特殊命令（任务列表和取消任务）
-            if command.startswith("任务列表"):
-                # 任务列表需要密码
-                parts = command.split()
-                if len(parts) < 2:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入密码")
+            try:
+                # 移除指令前缀
+                command = content.replace(self.command_prefix, "", 1).strip()
+                
+                # 空命令显示帮助
+                if not command:
+                    e_context['reply'] = Reply(ReplyType.TEXT, self.get_help_text())
                     e_context.action = EventAction.BREAK_PASS
                     return
                 
-                password = parts[1]
-                if password != self.plugin_config.get("task_list_password"):
-                    e_context['reply'] = Reply(ReplyType.TEXT, "密码错误")
+                # 处理特殊命令
+                if command.startswith("任务列表"):
+                    parts = command.split()
+                    if len(parts) < 2:
+                        e_context['reply'] = Reply(ReplyType.TEXT, "请提供密码，格式：$time 任务列表 密码")
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                        
+                    password = parts[1]
+                    if password != self.plugin_config.get("task_list_password"):
+                        e_context['reply'] = Reply(ReplyType.TEXT, "密码错误")
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                        
+                    task_list = self._get_task_list()
+                    e_context['reply'] = Reply(ReplyType.TEXT, task_list)
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                    
+                if command.startswith("取消"):
+                    task_id = command.replace("取消", "", 1).strip()
+                    if not task_id:
+                        e_context['reply'] = Reply(ReplyType.TEXT, "请提供任务ID，格式：$time 取消 任务ID")
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                        
+                    result = self._delete_task(task_id)
+                    e_context['reply'] = Reply(ReplyType.TEXT, result)
                     e_context.action = EventAction.BREAK_PASS
                     return
                 
-                result = self._get_task_list()
-                e_context['reply'] = Reply(ReplyType.TEXT, result)
+                # 使用 LLM 解析所有其他命令
+                success, result = self._parse_command_with_llm(command)
+                if success:
+                    try:
+                        result = self._create_task_direct(result, e_context['context'])
+                        if result.startswith("已创建任务"):
+                            e_context['reply'] = Reply(ReplyType.TEXT, result)
+                        else:
+                            e_context['reply'] = Reply(ReplyType.TEXT, f"创建任务失败: {result}\n请使用 $time help 查看正确的命令格式")
+                    except Exception as e:
+                        e_context['reply'] = Reply(ReplyType.TEXT, f"创建任务失败: {str(e)}\n请使用 $time help 查看正确的命令格式")
+                else:
+                    if "需要提供正确密码" in result:
+                        e_context['reply'] = Reply(ReplyType.TEXT, f"命令解析失败: {result}")
+                    else:
+                        e_context['reply'] = Reply(ReplyType.TEXT, f"命令解析失败: {result}\n请使用 $time help 查看正确的命令格式")
                 e_context.action = EventAction.BREAK_PASS
                 return
-            
-            elif command.startswith("取消"):
-                # 取消任务不需要密码
-                task_id = command.replace("取消", "", 1).strip()
-                if not task_id:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入要取消的任务ID")
-                    e_context.action = EventAction.BREAK_PASS
-                    return
                 
-                result = self._delete_task(task_id)
-                e_context['reply'] = Reply(ReplyType.TEXT, result)
+            except Exception as e:
+                error_msg = f"命令处理失败: {str(e)}\n请使用 $time help 查看正确的命令格式"
+                e_context['reply'] = Reply(ReplyType.TEXT, error_msg)
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 解析命令：时间描述和事件内容
-            if command.startswith("cron["):
-                # 对于 cron 表达式，找到完整的 cron 部分
-                cron_end = command.find("]")
-                if cron_end == -1:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "cron表达式格式错误，缺少结束符号 ]")
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-                time_desc = command[:cron_end + 1]
-                event_content = command[cron_end + 1:].strip()
-            else:
-                # 普通命令的解析
-                first_space = command.find(' ')
-                if first_space == -1:
-                    e_context['reply'] = Reply(ReplyType.TEXT, "请输入时间描述和事件内容，格式：$time 时间描述 事件内容")
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-                time_desc = command[:first_space].strip()
-                event_content = command[first_space:].strip()
-
-            if not event_content:
-                e_context['reply'] = Reply(ReplyType.TEXT, "请输入事件内容")
+        # 处理不带命令前缀但包含关键词的消息
+        elif "分钟后" in content or "小时后" in content or content.startswith("提醒") or \
+             "每天" in content or "每周" in content or "工作日" in content:
+            try:
+                success, result = self._parse_command_with_llm(content)
+                if success:
+                    try:
+                        result = self._create_task_direct(result, e_context['context'])
+                        if result.startswith("已创建任务"):
+                            e_context['reply'] = Reply(ReplyType.TEXT, result)
+                        else:
+                            e_context['reply'] = Reply(ReplyType.TEXT, f"创建任务失败: {result}")
+                    except Exception as e:
+                        e_context['reply'] = Reply(ReplyType.TEXT, f"创建任务失败: {str(e)}")
+                else:
+                    if "需要提供正确密码" in result:
+                        e_context['reply'] = Reply(ReplyType.TEXT, f"命令解析失败: {result}")
+                    else:
+                        e_context['reply'] = Reply(ReplyType.TEXT, f"命令解析失败: {result}\n请使用 $time help 查看正确的命令格式")
+                e_context.action = EventAction.BREAK_PASS
+                return
+            except Exception as e:
+                error_msg = f"命令处理失败: {str(e)}\n请使用 $time help 查看正确的命令格式"
+                e_context['reply'] = Reply(ReplyType.TEXT, error_msg)
                 e_context.action = EventAction.BREAK_PASS
                 return
 
-            # 使用 LLM 解析时间描述
-            success, result = self._parse_time_with_llm(time_desc)
-            if not success:
-                e_context['reply'] = Reply(ReplyType.TEXT, result)
-                e_context.action = EventAction.BREAK_PASS
-                return
-
-            # 创建任务
-            result = self._create_task(result["time"], result["circle"], event_content, e_context['context'])
-
-            e_context['reply'] = Reply(ReplyType.TEXT, result)
-            e_context.action = EventAction.BREAK_PASS
-
-    def _parse_time_with_llm(self, description):
-        """使用 LLM 解析时间描述"""
+    def _parse_command_with_llm(self, user_input):
+        """使用 LLM 解析用户输入并生成标准指令格式"""
         try:
             # 获取 OpenAI 配置
             api_base = self.plugin_config.get("openai_api_base", "https://api.openai.com/v1")
@@ -1331,54 +1340,68 @@ Cron表达式格式（高级）：
             # 构建 prompt
             prompt = f"""当前时间是: {current_time}
 
-请解析以下时间描述，并转换为标准格式：{description}
+你是一个定时任务指令转换助手。你的任务是将用户的自然语言输入转换为标准格式的定时任务指令。
 
-请以 JSON 格式返回，必须包含以下字段:
-- time: 具体时间 (HH:mm格式，如 09:30)
-- circle: 周期类型，用于展示。如果是 cron 表达式，则保持原始 cron 表达式
-- cron: cron表达式，格式：cron[分 时 日 月 周]
+指令格式规范：
+1. 基本格式：$time [周期] [时间] [事件内容]
+   - 所有部分之间使用单个空格分隔
+   - 如果输入不符合要求，直接返回以"错误:"开头的错误信息，不要添加任何其他字符
 
-特别说明：对于特殊周期（如每x小时），请按以下格式返回：
-- time: cron
-- circle: cron[分 时 日 月 周] 格式
-- cron: cron[分 时 日 月 周]
+2. [周期][时间]格式说明：
+   A. 一次性任务：
+      - [周期]使用"今天"、"明天"、"后天"或具体日期
+      - [时间]必须使用24小时制的 HH:mm 格式
+      示例：
+      - 相对时间：当前时间 {now.strftime('%H:%M')}
+        "1分钟后" → "今天 {(now + timedelta(minutes=1)).strftime('%H:%M')}"
+        "2小时后" → "今天 {(now + timedelta(hours=2)).strftime('%H:%M')}"
+      - 明天/后天：
+        "明天下午3点" → "明天 15:00"
+      - 具体日期：
+        "2024-01-01 早上9点" → "2024-01-01 09:00"
 
-示例输入: "每2小时"
-示例输出: {{"time": "cron", "circle": "cron[mm */2 * * *]", "cron": "cron[mm */2 * * *]"}}
+   B. 循环任务：
+      - [周期]使用 cron 表达式：cron[分 时 日 月 周]
+      - [时间]字段留空，时间信息包含在 cron 表达式中
+      示例：
+      - 每天任务：
+        "每天早上9点" → "cron[0 9 * * *]"
+      - 工作日任务：
+        "工作日下午6点" → "cron[0 18 * * 1-5]"
+      - 每周任务：
+        "每周一三五晚上8点" → "cron[0 20 * * 1,3,5]"
 
-示例输入: "cron[20,40 * * * *]"
-示例输出: {{"time": "cron", "circle": "cron[20,40 * * * *]", "cron": "cron[20,40 * * * *]"}}
+3. [事件内容]格式说明：
+    [事件内容] 用户输入中可能会包含三种或者一种信息：任务对象和密码（这两种必须同时有或者同时没有），任务内容（这个必须有）
+    你需要从用户文字中解析出这三部分内容
+        - 如果带有'g'或'群'字则表示对象为群，需要按格式："g[群名] 密码 任务内容" 进行输出，注意其中的"g[]"是固定格式，不能省略
+        - 其他情况默认所指对象为用户，需按格式："u[用户名] 密码 任务内容"进行输出，注意其中的"u[]"是固定格式，不能省略
+        - 如果指令中有对象但没提供密码，则返回"错误:需要提供密码"
+    如果没有指定对象，则只需按格式："任务内容"进行输出
+    任务内容的注意事项：
+        如果任务内容中含有"提醒"字样，则在任务内容中"提醒"这两个字不可省略！
+        任务内容必须保持原样，特别针对"$", " "等特殊符号，不得省略及改变文字顺序。
+    
 
+用户输入: <{user_input}>
 
-示例输入: "每天早上9点"
-示例输出: {{"time": "09:00", "circle": "每天", "cron": "cron[0 9 * * *]"}}
+示例转换：
+1. "1分钟后给测试群发送$总结 100，密码为8888"
+   → $time 今天 {(now + timedelta(minutes=1)).strftime('%H:%M')} g[测试群] 8888 $总结 100
 
-示例输入: "明天中午12点"
-示例输出: {{"time": "12:00", "circle": "明天", "cron": "cron[0 12 14 1 *]"}}
+2. "每天早上9点给技术群发送日报，密码是1234"
+   → $time 每天 09:00 g[技术群] 1234 日报
 
-示例输入: "每周一三五下午2点"
-示例输出: {{"time": "14:00", "circle": "每周一三五", "cron": "cron[0 14 * * 1,3,5]"}}
+3. "每天早上9点叫我喝水"
+   → $time 每天 09:00 叫我喝水
 
-示例输入: "工作日下午6点"
-示例输出: {{"time": "18:00", "circle": "工作日", "cron": "cron[0 18 * * 1-5]"}}
+4. "每天下午3点提醒开会"
+   → $time 每天 15:00 提醒开会
 
-示例输入: "2024-01-01 12:00"
-示例输出: {{"time": "12:00", "circle": "2024-01-01", "cron": "cron[0 12 1 1 *]"}}
+5. "每天早上8点执行$帮助"
+   → $time 每天 08:00 $帮助
 
-示例输入: "每年1月1日上午9点"
-示例输出: {{"time": "09:00", "circle": "每年1月1日", "cron": "cron[0 9 1 1 *]"}}
-
-示例输入: "5分钟后"
-示例输出: {{"time": "14:25", "circle": "今天", "cron": "cron[25 14 13 1 *]"}}
-
-示例输入: "2小时30分钟后"
-示例输出: {{"time": "16:50", "circle": "今天", "cron": "cron[50 16 13 1 *]"}}
-
-对于相对时间（如"几分钟后"、"几小时后"等），请计算出具体时间点并生成对应的 cron 表达式。
-所有时间都必须转换为 cron 表达式格式。"""
-
-            # 添加日志输出
-            logger.info(f"[DifyTask] 发送给 LLM 的提示词: {prompt}")
+请直接返回转换后的标准指令格式或错误提示，不要包含任何解释。"""
 
             # 准备请求参数
             url = f"{api_base}/chat/completions"
@@ -1389,43 +1412,50 @@ Cron表达式格式（高级）：
             payload = {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "你是一个时间解析助手，专门负责将自然语言的时间描述转换为标准格式。"},
+                    {"role": "system", "content": "你是一个时间解析助手,负责将自然语言转换为标准的定时任务指令格式。"},
                     {"role": "user", "content": prompt}
                 ]
             }
 
             # 发送请求
             response = requests.post(url, headers=headers, json=payload)
+
             if response.status_code != 200:
-                logger.error(f"[DifyTask] OpenAI API 错误: {response.text}")
                 return False, f"解析失败：API 错误 {response.status_code}"
 
-            # 解析返回的 JSON
-            try:
-                content = response.json()["choices"][0]["message"]["content"]
-                
-                # 处理可能包含的 Markdown 代码块
-                if "```json" in content:
-                    # 提取代码块中的 JSON 内容
-                    json_content = content.split("```json\n")[1].split("\n```")[0]
-                    result = json.loads(json_content)
-                else:
-                    result = json.loads(content)
-                    
-                logger.debug(f"[DifyTask] LLM解析结果: {result}")
-                
-                # 验证返回格式
-                if not all(k in result for k in ["time", "circle", "cron"]):
-                    return False, "解析结果缺少必要字段"
-                
-                # 验证 cron 格式
-                if not result["cron"].startswith("cron[") or not result["cron"].endswith("]"):
-                    return False, "cron表达式格式错误"
-                    
-                return True, result
-            except json.JSONDecodeError:
-                logger.error(f"[DifyTask] LLM返回格式错误: {response.text}")
+            result = response.json()["choices"][0]["message"]["content"].strip()
+            logger.info(f"[DifyTask] LLM原始返回: {result}")
+            
+            # 移除 think 标签及其内容
+            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+            logger.info(f"[DifyTask] LLM解析结果(移除think): {result}")
+            
+            # 改进错误处理
+            if result.startswith("错误:"):
+                return False, result[3:].strip()
+            
+            # 验证返回的指令格式
+            if not result.startswith("$time"):
                 return False, "解析结果格式错误"
+            
+            # 检查是否包含群任务或用户任务但缺少密码
+            command = result.replace("$time", "", 1).strip()
+            if ("g[" in command or "u[" in command) and self.plugin_config.get("task_list_password") not in command:
+                task_type = "群任务" if "g[" in command else "用户任务"
+                return False, f"创建{task_type}需要提供正确密码"
+            
+            # 检查特殊命令格式
+            if "$" in user_input:
+                # 从原始输入中提取所有$开头的命令
+                special_commands = re.findall(r'\$\w+(?:\s+\d+)?', user_input)
+                if special_commands:
+                    # 确保这些命令都在最终结果中且格式正确
+                    for cmd in special_commands:
+                        if cmd not in command:
+                            logger.warning(f"[DifyTask] 特殊命令 {cmd} 在转换过程中丢失或格式改变")
+                            return False, f"特殊命令 {cmd} 格式转换错误，请确保命令格式正确"
+            
+            return True, command
 
         except Exception as e:
             logger.error(f"[DifyTask] LLM解析失败: {e}")
@@ -1545,3 +1575,13 @@ Cron表达式格式（高级）：
             return True
         except:
             return False 
+
+    def _create_task_direct(self, command, context):
+        """直接创建任务,不使用大模型解析"""
+        # 解析命令
+        parts = command.split(None, 2)
+        if len(parts) < 3:
+            raise ValueError("格式错误")
+        
+        circle_str, time_str, event_str = parts
+        return self._create_task(time_str, circle_str, event_str, context)
