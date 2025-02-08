@@ -139,6 +139,7 @@ class DifyTask(Plugin):
         """定时器循环"""
         last_group_update = 0
         last_check_time = 0
+        last_cleanup_date = None  # 添加上次清理日期记录
 
         while self._running:
             try:
@@ -152,9 +153,13 @@ class DifyTask(Plugin):
 
                 last_check_time = current_time
 
-                # 每天凌晨3点清理过期任务
-                if now.hour == 3 and now.minute == 0 and now.second == 0:
+                # 修改清理逻辑：每天凌晨3点左右执行一次
+                current_date = now.date()
+                if (last_cleanup_date is None or current_date > last_cleanup_date) and \
+                   now.hour == 3 and 0 <= now.minute < 5:  # 给出5分钟的时间窗口
                     self._clean_expired_tasks()
+                    last_cleanup_date = current_date
+                    logger.info("[DifyTask] 执行每日清理任务完成")
                 
                 # 每6小时更新一次群信息
                 if current_time - last_group_update > 21600:  # 21600秒 = 6小时
@@ -1063,6 +1068,7 @@ Cron表达式格式（高级）：
 
     def _clean_expired_tasks(self):
         """清理过期任务"""
+        logger.info("[DifyTask] 开始执行清理过期任务")
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -1106,7 +1112,8 @@ Cron表达式格式（高级）：
             
             conn.commit()
             conn.close()
-            logger.info(f"[DifyTask] 清理过期任务完成，共删除 {deleted_count} 个任务")
+            if deleted_count > 0:
+                logger.info(f"[DifyTask] 清理过期任务完成，共删除 {deleted_count} 个任务")
         except Exception as e:
             logger.error(f"[DifyTask] 清理过期任务失败: {e}")
 
@@ -1130,7 +1137,7 @@ Cron表达式格式（高级）：
                     
                     # 去掉"提醒"前缀并格式化消息
                     reminder_content = content[2:].strip()  # 移除"提醒"两个字
-                    reminder_message = f"⏰ 定时提醒\n{'-' * 20}\n{reminder_content}\n{'-' * 20}\n发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    reminder_message = f"? 定时提醒\n{'-' * 20}\n{reminder_content}\n{'-' * 20}\n发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                     
                     # 发送提醒消息
                     client.post_text(
@@ -1367,12 +1374,22 @@ Cron表达式格式（高级）：
             if not api_key:
                 return False, "OpenAI API 密钥未配置，请在配置文件中设置 openai_api_key"
 
-            # 获取当前时间
+            # 获取当前时间和星期
             now = datetime.now()
+            weekday_map = {
+                0: '星期一',
+                1: '星期二',
+                2: '星期三',
+                3: '星期四',
+                4: '星期五',
+                5: '星期六',
+                6: '星期日'
+            }
+            current_weekday = weekday_map[now.weekday()]
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
             
             # 构建 prompt
-            prompt = f"""当前时间是: {current_time}
+            prompt = f"""当前时间是: {current_time} {current_weekday}
 
 你是一个定时任务指令转换助手。你的任务是将用户的自然语言输入转换为标准格式的定时任务指令。
 
