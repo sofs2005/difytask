@@ -401,33 +401,20 @@ class DifyTask(Plugin):
 命令前缀: {self.command_prefix}
 
 1. 创建定时任务
-基础格式：
-{self.command_prefix} 周期 时间 事件内容
+直接发送时间描述和任务内容，格式：`$time 任意时间和任务内容描述`
 
-支持的周期格式：
-- 每天 09:30 早安
-- 工作日 18:00 下班提醒
-- 每周一 10:00 周报时间
-- 今天 23:30 睡觉提醒
-- 明天 12:00 午饭提醒
-- 后天 09:00 周末快乐
-- 2024-01-01 12:00 新年快乐
+a. 任务描述中含有提醒字样，则会被直接转发，否则会依次调用插件，如果插件都没做处理，则最后发给所接LLM处理
+b. 私聊任务描述中对象含有"群\g"字样，则会被认为是群任务，否则会被认为是私聊任务，支持模糊匹配
+c. 私聊新建指定群、用户任务需提供密码，可以任意描述，你能看懂即可
 
-Cron表达式格式（高级）：
-{self.command_prefix} cron[分 时 日 月 周] 事件内容
-例如：
-{self.command_prefix} cron[0 9 * * 1-5] 该起床了
-{self.command_prefix} cron[*/30 * * * *] 喝水提醒
-{self.command_prefix} cron[0 */2 * * *] 休息一下
+2. 任务管理
+# 查看任务列表（需要密码）
+{self.command_prefix} 任务列表 你的密码
 
-私聊时创建群任务：
-{self.command_prefix} 每天 09:30 g[测试群]早安
+# 取消任务
+{self.command_prefix} 取消任务ID（不区分大小写）
 
-2. 查看任务列表
-{self.command_prefix} 任务列表 密码
-
-3. 取消任务
-{self.command_prefix} 取消 任务ID"""
+"""
 
     def _get_user_nickname(self, user_id):
         """获取用户昵称"""
@@ -746,7 +733,7 @@ Cron表达式格式（高级）：
             cursor = conn.cursor()
             
             try:
-                 # 保存原始时间用于比较
+                # 保存原始时间用于比较
                 original_time = time_str
                 # 检查任务数量是否超出限制
                 cursor.execute('SELECT COUNT(*) FROM tasks')
@@ -761,7 +748,7 @@ Cron表达式格式（高级）：
                     return "无法调整时间，可能已超出有效范围"
                 if adjusted_time != time_str:
                     time_str = adjusted_time
-                    logger.info(f"[DifyTask] 任务时间已自动调整为: {time_str} 以避免冲突")
+                    logger.debug(f"[DifyTask] 任务时间已自动调整为: {time_str} 以避免冲突")
                 # 保存到数据库前的最后验证
                 if not self._is_valid_task_data(time_str, circle_str, event_str):
                     return "任务数据验证失败，请检查输入"   
@@ -806,12 +793,12 @@ Cron表达式格式（高级）：
                 
                 # 获取消息相关信息
                 cmsg: ChatMessage = context.get("msg", None)
-                logger.info(f"[DifyTask] 原始消息对象: {cmsg}")
+                logger.debug(f"[DifyTask] 原始消息对象: {cmsg}")
                 msg_info = {}
                 
                 # 检查是否在私聊中指定了用户或群组
                 if not is_group:
-                    logger.info("[DifyTask] 进入私聊处理分支")
+                    logger.debug("[DifyTask] 进入私聊处理分支")
                     # 检查是否指定了用户
                     if event_str.startswith("u["):
                         # 从事件内容中提取用户名和密码，格式：u[用户名] 密码 其他内容
@@ -961,12 +948,12 @@ Cron表达式格式（高级）：
                                 "create_time": int(time.time()),
                                 "is_group": False
                             }
-                        logger.info(f"[DifyTask] 私聊消息信息构建完成: {msg_info}")
+                        logger.debug(f"[DifyTask] 私聊消息信息构建完成: {msg_info}")
                 else:
                     # 群聊消息处理
-                    logger.info("[DifyTask] 进入群聊处理分支")
-                    logger.info(f"[DifyTask] cmsg 类型: {type(cmsg)}")
-                    logger.info(f"[DifyTask] cmsg 值: {cmsg}")
+                    logger.debug("[DifyTask] 进入群聊处理分支")
+                    logger.debug(f"[DifyTask] cmsg 类型: {type(cmsg)}")
+                    logger.debug(f"[DifyTask] cmsg 值: {cmsg}")
                     
                     # 获取群名称
                     try:
@@ -995,9 +982,9 @@ Cron表达式格式（高级）：
                             "other_user_nickname": f"群聊_{cmsg.from_user_id}",  # 使用默认群名称
                             "actual_user_nickname": f"群聊_{cmsg.from_user_id}"  # 使用默认群名称
                         }
-                    logger.info(f"[DifyTask] 群聊消息信息构建完成: {msg_info}")
+                    logger.debug(f"[DifyTask] 群聊消息信息构建完成: {msg_info}")
                 
-                logger.info(f"[DifyTask] 最终的 msg_info: {msg_info}")
+                logger.debug(f"[DifyTask] 最终的 msg_info: {msg_info}")
                 
                 # 构建上下文信息
                 context_info = {
@@ -1006,10 +993,10 @@ Cron表达式格式（高级）：
                     "isgroup": is_group,
                     "msg": msg_info
                 }
-                logger.info(f"[DifyTask] 完整的上下文信息: {context_info}")
+                logger.debug(f"[DifyTask] 完整的上下文信息: {context_info}")
                 
                 # 在保存到数据库之前再次检查
-                logger.info(f"[DifyTask] 即将保存到数据库的上下文信息: {json.dumps(context_info)}")
+                logger.debug(f"[DifyTask] 即将保存到数据库的上下文信息: {json.dumps(context_info)}")
                 
                 # 保存到数据库
                 cursor.execute('''
@@ -1389,9 +1376,7 @@ Cron表达式格式（高级）：
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
             
             # 构建 prompt
-            prompt = f"""当前时间是: {current_time} {current_weekday}
-
-你是一个定时任务指令转换助手。你的任务是将用户的自然语言输入转换为标准格式的定时任务指令。
+            prompt = f"""你是一个定时任务指令转换助手。你的任务是将用户的自然语言输入转换为标准格式的定时任务指令。
 
 指令格式规范：
 1. 基本格式：$time [周期] [时间] [事件内容]
@@ -1436,12 +1421,13 @@ Cron表达式格式（高级）：
     
 
 用户输入: <{user_input}>
+请根据当前时间{current_time} {current_weekday}，对用户输入内容进行时间、周期、对象、任务的拆解，并按指令规范返回标准格式指令
 
 示例转换：
-1. "1分钟后给测试群发送$总结 100，密码为8888"
+1. "1分钟后给测试群发送$总结 100，密码8888"
    → $time 今天 {(now + timedelta(minutes=1)).strftime('%H:%M')} g[测试群] 8888 $总结 100
 
-2. "每天早上9点给技术群发送日报，密码是1234"
+2. "每天早上9点给技术群发送日报，密码1234"
    → $time 每天 09:00 g[技术群] 1234 日报
 
 3. "每天早上9点叫我喝水"
@@ -1480,7 +1466,7 @@ Cron表达式格式（高级）：
             
             # 移除 think 标签及其内容
             result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
-            logger.info(f"[DifyTask] LLM解析结果(移除think): {result}")
+            logger.info(f"[DifyTask] LLM解析结果: {result}")
             
             # 改进错误处理
             if result.startswith("错误:"):
