@@ -29,7 +29,7 @@ import requests
     desire_priority=950,
     hidden=False,
     desc="定时任务插件",
-    version="2.0.0",
+    version="2.1.0",
     author="sofs2005",
 )
 class DifyTask(Plugin):
@@ -1412,15 +1412,15 @@ Cron表达式格式（高级）：
         "2024-01-01 早上9点" → "2024-01-01 09:00"
 
    B. 循环任务：
-      - [周期]使用 cron 表达式：cron[分 时 日 月 周]
-      - [时间]字段留空，时间信息包含在 cron 表达式中
+      - [周期]合并使用 cron 表达式：cron[分 时 日 月 周]
+      - [时间]固定使用"cron"
       示例：
       - 每天任务：
-        "每天早上9点" → "cron[0 9 * * *]"
+        "每天早上9点" → "cron[0 9 * * *] cron"
       - 工作日任务：
-        "工作日下午6点" → "cron[0 18 * * 1-5]"
+        "工作日下午6点01分" → "cron[1 18 * * 1-5] cron"
       - 每周任务：
-        "每周一三五晚上8点" → "cron[0 20 * * 1,3,5]"
+        "每周一三五晚上8点" → "cron[0 20 * * 1,3,5] cron"
 
 3. [事件内容]格式说明：
     [事件内容] 用户输入中可能会包含三种或者一种信息：任务对象和密码（这两种必须同时有或者同时没有），任务内容（这个必须有）
@@ -1476,7 +1476,7 @@ Cron表达式格式（高级）：
                 return False, f"解析失败：API 错误 {response.status_code}"
 
             result = response.json()["choices"][0]["message"]["content"].strip()
-            logger.info(f"[DifyTask] LLM原始返回: {result}")
+            logger.debug(f"[DifyTask] LLM原始返回: {result}")
             
             # 移除 think 标签及其内容
             result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
@@ -1607,33 +1607,72 @@ Cron表达式格式（高级）：
         """验证任务数据的有效性"""
         try:
             if circle_str.startswith("cron["):
-                # 验证 cron 表达式
-                cron_exp = circle_str[5:-1].strip()
-                try:
-                    croniter(cron_exp)
-                    return True
-                except:
+                # 打印原始字符串和索引位置
+                logger.debug(f"[DifyTask] 原始circle_str: '{circle_str}'")
+                start_idx = circle_str.find("[") + 1
+                end_idx = circle_str.rfind("]")
+                logger.debug(f"[DifyTask] 方括号位置: start={start_idx-1}, end={end_idx}")
+                
+                if start_idx > 0 and end_idx > start_idx:
+                    cron_exp = circle_str[start_idx:end_idx].strip()
+                    try:
+                        logger.debug(f"[DifyTask] 提取的cron表达式: '{cron_exp}'")
+                        croniter(cron_exp)
+                        return True
+                    except Exception as e:
+                        logger.error(f"[DifyTask] cron表达式验证失败: {e}")
+                        return False
+                else:
+                    logger.error(f"[DifyTask] cron表达式格式错误：找不到完整的方括号 (start_idx={start_idx}, end_idx={end_idx})")
                     return False
             else:
                 # 验证时间格式
                 is_valid, _ = self._validate_time_format(time_str)
                 if not is_valid:
+                    logger.debug("[DifyTask] 时间格式验证失败")
                     return False
                     
                 # 验证周期格式
                 if not self._validate_circle_format(circle_str):
+                    logger.debug("[DifyTask] 周期格式验证失败")
                     return False
                     
             return True
-        except:
-            return False 
+        except Exception as e:
+            logger.error(f"[DifyTask] 任务数据验证失败: {e}")
+            return False
 
     def _create_task_direct(self, command, context):
         """直接创建任务,不使用大模型解析"""
-        # 解析命令
-        parts = command.split(None, 2)
-        if len(parts) < 3:
-            raise ValueError("格式错误")
-        
-        circle_str, time_str, event_str = parts
-        return self._create_task(time_str, circle_str, event_str, context)
+        try:
+            # 检查是否是 cron 表达式
+            if "cron[" in command:
+                # 找到完整的 cron 表达式
+                start_idx = command.find("cron[")
+                end_idx = command.find("]", start_idx)
+                if start_idx == -1 or end_idx == -1:
+                    raise ValueError("cron表达式格式错误")
+                    
+                # 提取 cron 表达式和事件内容
+                circle_str = command[start_idx:end_idx+1]
+                remaining = command[end_idx+1:].strip()
+                
+                # 分割剩余部分获取时间和事件
+                parts = remaining.split(None, 1)
+                if len(parts) != 2:
+                    raise ValueError("格式错误：缺少时间或事件内容")
+                    
+                time_str, event_str = parts
+                
+                logger.debug(f"[DifyTask] 解析结果: circle_str='{circle_str}', time_str='{time_str}', event_str='{event_str}'")
+            else:
+                # 原有的普通命令处理逻辑
+                parts = command.split(None, 2)
+                if len(parts) < 3:
+                    raise ValueError("格式错误")
+                circle_str, time_str, event_str = parts
+                
+            return self._create_task(time_str, circle_str, event_str, context)
+        except Exception as e:
+            logger.error(f"[DifyTask] 创建任务失败: {e}")
+            return str(e)
