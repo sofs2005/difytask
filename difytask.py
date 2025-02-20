@@ -1410,16 +1410,15 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
             prompt = f"""你是一个定时任务指令转换助手。你的任务是将用户的自然语言输入转换为标准格式的定时任务指令。
 
 指令格式规范：
-1. 基本格式：$time [周期] [时间] [事件内容]
+1. 输出指令的基本格式：$time [周期] [时间] [事件内容]
    - 所有部分之间使用单个空格分隔
-   - 如果输入不符合要求，直接返回以"错误:"开头的错误信息，不要添加任何其他字符
 
 2. [周期][时间]格式说明：
    A. 一次性任务：
       - [周期]使用"今天"、"明天"、"后天"或具体日期
       - [时间]必须使用24小时制的 HH:mm 格式
       示例：
-      - 相对时间：当前时间 {now.strftime('%H:%M')}
+      - 相对时间：现在 {now.strftime('%H:%M')}
         "1分钟后" → "今天 {(now + timedelta(minutes=1)).strftime('%H:%M')}"
         "2小时后" → "今天 {(now + timedelta(hours=2)).strftime('%H:%M')}"
       - 明天/后天：
@@ -1470,7 +1469,7 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
 5. "每天早上8点执行$帮助"
    → $time 每天 08:00 $帮助
 
-请直接返回转换后的标准指令格式或错误提示，不要包含任何解释。"""
+请只返回转换后的标准指令格式或错误提示，不要包含任何你的思考过程以及解释。"""
 
             # 准备请求参数
             url = f"{api_base}/chat/completions"
@@ -1496,7 +1495,9 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
             logger.debug(f"[DifyTask] LLM原始返回: {result}")
             
             # 移除 think 标签及其内容
-            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+            # result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+            # 提取最后一个 $time 命令
+            result = self.extract_last_command(result)  # 使用 self 调用类方法
             logger.info(f"[DifyTask] LLM解析结果: {result}")
             
             # 改进错误处理
@@ -1693,3 +1694,13 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
         except Exception as e:
             logger.error(f"[DifyTask] 创建任务失败: {e}")
             return str(e)
+
+    def extract_last_command(self, response: str) -> str:
+        """从返回内容中提取最后一个 $time 命令"""
+        import re
+        # 匹配最后一个 $time 开始的命令
+        pattern = r'\$time\s+.*$'
+        matches = re.findall(pattern, response, re.MULTILINE)
+        if matches:
+            return matches[-1]  # 返回最后一个匹配
+        return response  # 如果没有匹配，返回原文
