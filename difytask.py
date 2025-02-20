@@ -1110,6 +1110,7 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
             msg_info = context_info.get('msg', {})
             content = context_info.get('content', '')
             is_group = context_info.get('isgroup', False)
+            target_user_id = msg_info.get('target_user_id')  # 获取被指定的用户ID
             
             # 判断是否是提醒功能
             if content.startswith('提醒'):
@@ -1140,65 +1141,95 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
             else:
                 # 非提醒消息，需要转发给其他插件处理
                 try:
-                    chat_msg = ChatMessage({})
+                    # 获取 GeWeChatChannel 单例实例
+                    from channel.gewechat.gewechat_channel import GeWeChatChannel
+                    channel = GeWeChatChannel()
+                    
+                    # 使用 channel 的 client 创建 GeWeChatMessage
+                    from channel.gewechat.gewechat_message import GeWeChatMessage
+                    chat_msg = GeWeChatMessage({
+                        'Data': {
+                            'Content': {'string': content},
+                            'FromUserName': {'string': msg_info.get('from_user_id')},
+                            'ToUserName': {'string': msg_info.get('to_user_id')},
+                            'CreateTime': msg_info.get('create_time', int(time.time())),
+                        },
+                        'Wxid': msg_info.get('to_user_id'),  # 机器人的 wxid
+                        'Appid': conf().get("gewechat_app_id")  # 添加 app_id
+                    }, channel.client)
+                    
                     chat_msg.content = content
-                    chat_msg.from_user_id = msg_info.get('from_user_id')
+                    chat_msg.from_user_id = target_user_id if target_user_id else msg_info.get('from_user_id')
                     chat_msg.to_user_id = msg_info.get('to_user_id')
                     chat_msg.actual_user_id = msg_info.get('actual_user_id', msg_info.get('from_user_id'))
-                    chat_msg.create_time = msg_info.get("create_time", int(time.time()))
+                    chat_msg.create_time = msg_info.get('create_time', int(time.time()))
                     chat_msg.is_group = is_group
                     chat_msg._prepared = True
                     
-                    # 设置其他用户ID和昵称
+                    # 设置其他用户ID
                     chat_msg.other_user_id = chat_msg.from_user_id
-                    
-                    # 获取昵称（统一使用数据库）
-                    try:
-                        conn = sqlite3.connect(self.db_path)
-                        cursor = conn.cursor()
-                        
-                        if is_group:
-                            cursor.execute('SELECT nickname FROM groups WHERE wxid = ?', (chat_msg.from_user_id,))
-                        else:
-                            cursor.execute('SELECT nickname FROM contacts WHERE wxid = ?', (chat_msg.from_user_id,))
-                        
-                        result = cursor.fetchone()
-                        conn.close()
-                        
-                        if result:
-                            chat_msg.other_user_nickname = result[0]
-                            chat_msg.actual_user_nickname = result[0]
-                        else:
-                            default_name = f"群聊_{chat_msg.from_user_id}" if is_group else f"用户_{chat_msg.from_user_id}"
-                            chat_msg.other_user_nickname = default_name
-                            chat_msg.actual_user_nickname = default_name
+
+                    # 获取用户昵称
+                    # 1. 首先从消息中获取昵称
+                    chat_msg.other_user_nickname = msg_info.get('other_user_nickname')
+                    chat_msg.actual_user_nickname = msg_info.get('actual_user_nickname')
+
+                    # 2. 如果消息中没有昵称，从数据库获取
+                    if not chat_msg.other_user_nickname or not chat_msg.actual_user_nickname:
+                        try:
+                            conn = sqlite3.connect(self.db_path)
+                            cursor = conn.cursor()
                             
-                        logger.debug(f"[DifyTask] 使用昵称: {chat_msg.other_user_nickname}")
-                        
-                    except Exception as e:
-                        logger.error(f"[DifyTask] 获取昵称失败: {str(e)}")
-                        default_name = f"群聊_{chat_msg.from_user_id}" if is_group else f"用户_{chat_msg.from_user_id}"
-                        chat_msg.other_user_nickname = default_name
-                        chat_msg.actual_user_nickname = default_name
+                            if is_group:
+                                cursor.execute('SELECT nickname FROM groups WHERE wxid = ?', (chat_msg.from_user_id,))
+                            else:
+                                cursor.execute('SELECT nickname FROM contacts WHERE wxid = ?', (chat_msg.from_user_id,))
+                            
+                            result = cursor.fetchone()
+                            conn.close()
+                            
+                            if result:
+                                chat_msg.other_user_nickname = chat_msg.other_user_nickname or result[0]
+                                chat_msg.actual_user_nickname = chat_msg.actual_user_nickname or result[0]
+                        except Exception as e:
+                            logger.error(f"[DifyTask] 从数据库获取昵称失败: {e}")
+
+                    # 3. 如果还是没有昵称，使用默认值
+                    if not chat_msg.other_user_nickname:
+                        chat_msg.other_user_nickname = f"{'群聊' if is_group else '用户'}_{chat_msg.from_user_id}"
+                    if not chat_msg.actual_user_nickname:
+                        chat_msg.actual_user_nickname = f"用户_{chat_msg.actual_user_id}"
 
                     # 构建 Context
                     context = Context(ContextType.TEXT, content)
-                    context["session_id"] = msg_info.get('from_user_id')
-                    context["receiver"] = msg_info.get('from_user_id')
-                    context["msg"] = chat_msg
+                    
+                    # 基础属性设置
                     context["isgroup"] = is_group
-                    context["group_name"] = chat_msg.other_user_nickname if is_group else None
-                    context["is_shared_session_group"] = True if is_group else False
+                    context["msg"] = chat_msg
                     context["origin_ctype"] = ContextType.TEXT
                     context["openai_api_key"] = None
                     context["gpt_model"] = None
-                    context["no_need_at"] = True
                     
-                    # 创建 channel 并发送消息
-                    from channel.gewechat.gewechat_channel import GeWeChatChannel
-                    channel = GeWeChatChannel()
-                    if not channel.client:
-                        channel.client = self.client
+                    if is_group:
+                        # 群聊消息特有属性
+                        context["group_name"] = chat_msg.other_user_nickname
+                        context["is_shared_session_group"] = True
+                        context["session_id"] = chat_msg.from_user_id  # 群ID
+                        context["receiver"] = chat_msg.from_user_id    # 群ID
+                    else:
+                        # 单聊消息特有属性
+                        target_id = target_user_id if target_user_id else chat_msg.from_user_id
+                        context["session_id"] = target_id
+                        context["receiver"] = target_id
+                        # 确保不包含群聊属性
+                        if "group_name" in context:
+                            del context["group_name"]
+                        if "is_shared_session_group" in context:
+                            del context["is_shared_session_group"]
+
+                    logger.debug(f"[DifyTask] 执行任务时的context: {context}")
+                    
+                    # 使用 channel 发送消息
                     channel.produce(context)
                     logger.info(f"[DifyTask] 已转发消息到插件处理: {task_id}")
                     
