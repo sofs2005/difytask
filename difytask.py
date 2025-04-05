@@ -848,7 +848,9 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
                                     "actual_user_id": cmsg.from_user_id,
                                     "to_user_id": cmsg.to_user_id,
                                     "create_time": cmsg.create_time,
-                                    "is_group": False
+                                    "is_group": False,
+                                    "session_id": target_user,  # 添加这行
+                                    "receiver": target_user     # 添加这行
                                 }
                             else:
                                 msg_info = {
@@ -856,7 +858,9 @@ c. 私聊新建指定群、用户任务需提供密码，可以任意描述，�
                                     "actual_user_id": context.get("session_id", ""),
                                     "to_user_id": context.get("receiver", ""),
                                     "create_time": int(time.time()),
-                                    "is_group": False
+                                    "is_group": False,
+                                    "session_id": target_user,  # 添加这行
+                                    "receiver": target_user     # 添加这行
                                 }
                             logger.debug(f"[DifyTask] 找到用户: {results[0][1]}, wxid: {target_user}")
                         else:
